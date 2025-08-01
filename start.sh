@@ -3,7 +3,7 @@
 # 文件名：manage_nonebot.sh
 
 # 配置区 ==============================================
-NB_WORKDIR="/home/PeterAlbus/napcat/nonebot/my-bot"  # NoneBot 项目路径
+NB_WORKDIR="/home/PeterAlbus/napcat/nonebot/peteralbus_nonebot"  # NoneBot 项目路径
 # VENV_PATH="/root/anaconda3/envs/nonebot"                  # 虚拟环境路径（若无则留空）
 PID_FILE="$NB_WORKDIR/nb.pid"              # PID 存储文件
 LOG_FILE="$NB_WORKDIR/nb.log"               # 日志文件路径
