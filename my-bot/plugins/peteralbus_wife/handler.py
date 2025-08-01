@@ -1,6 +1,6 @@
 from nonebot import on_command
-from nonebot.rule import to_me
-from .config import config
+from nonebot.rule import at_me
+from . import config
 from pathlib import Path
 import random
 from nonebot.log import logger
@@ -14,7 +14,7 @@ from nonebot.adapters.onebot.v11 import (
     MessageSegment,
 )
 
-today_wife = on_command("今日老婆", rule=to_me(), aliases={"老婆"}, priority=10, block=True)
+today_wife = on_command("今日老婆", rule=at_me(), aliases={"老婆"}, priority=10, block=True)
 
 def random_wife_pic():
     """
