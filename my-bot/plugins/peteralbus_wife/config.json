@@ -1,0 +1,35 @@
+{
+  "version": "2.1",
+  "log": true,
+  "dir_rule": {
+    "rule": "Bd_Atitle_Pindex",
+    "base_dir": "/home/PeterAlbus/napcat/resources/jm"
+  },
+  "download": {
+    "cache": true,
+    "image": {
+      "decode": true,
+      "suffix": ".jpg"
+    },
+    "threading": {
+      "image": 30,
+      "photo": 24
+    }
+  },
+  "client": {
+    "cache": null,
+    "domain": [],
+    "postman": {
+      "type": "cffi",
+      "meta_data": {
+        "impersonate": "chrome110",
+        "headers": null
+      }
+    },
+    "impl": "api",
+    "retry_times": 5
+  },
+  "plugins": {
+    "valid": "log"
+  }
+}

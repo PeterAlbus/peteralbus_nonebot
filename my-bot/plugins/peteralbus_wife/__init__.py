@@ -4,6 +4,7 @@ from nonebot.plugin import PluginMetadata
 from .config import Config
 
 from . import handler as _
+from . import jm_downloader as _
 
 __plugin_meta__ = PluginMetadata(
     name="peteralbus-wife",
