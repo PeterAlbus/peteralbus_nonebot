@@ -4,11 +4,15 @@ version = "0.1.0"
 description = "my-bot"
 readme = "README.md"
 requires-python = ">=3.9, <4.0"
+dependencies = [
+    "aiohttp",
+    "nonebot-plugin-apscheduler"
+]
 
 [tool.nonebot]
 adapters = [
     { name = "OneBot V11", module_name = "nonebot.adapters.onebot.v11" }
 ]
-plugins = ["nonebot_plugin_status", "nonebot_plugin_fortune", "nonebot_plugin_whateat_pic", "nonebot_plugin_learning_chat", "nonebot_plugin_animeres", "nonebot_plugin_fakemsg", "nonebot_plugin_fun_content"]
+plugins = ["nonebot_plugin_status", "nonebot_plugin_fortune", "nonebot_plugin_whateat_pic", "nonebot_plugin_learning_chat", "nonebot_plugin_animeres", "nonebot_plugin_fakemsg"]
 plugin_dirs = ['my-bot/plugins']
 builtin_plugins = ["echo"]
