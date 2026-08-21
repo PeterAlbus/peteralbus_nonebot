@@ -1,111 +1,232 @@
-from nonebot import on_command
-from nonebot.adapters.onebot.v11 import Bot, Event, Message
-from nonebot.params import CommandArg
-import img2pdf
-import os
+import asyncio
 import shutil
-from jmcomic import JmOption
-from jmcomic import *
-import jmcomic, os, time, yaml
-from PIL import Image
+import time
+from pathlib import Path
+from typing import Optional, Set, Tuple
+from uuid import uuid4
 
-#配置说明
-#使用前请修改配置文件路径
-#配置文件的base_dir路径为图片下载和缓存的路径，可以随意修改
+from jmcomic import Feature, JmOption, create_option_by_file, download_album_async
+from nonebot import get_plugin_config, on_command
+from nonebot.adapters.onebot.v11 import GROUP, Bot, GroupMessageEvent, Message
+from nonebot.log import logger
+from nonebot.params import CommandArg
 
-#定义配置文件路径
-option = jmcomic.create_option_by_file('/home/PeterAlbus/napcat/nonebot/peteralbus_nonebot/my-bot/plugins/peteralbus_wife/config.json')
-config = "/home/PeterAlbus/napcat/nonebot/peteralbus_nonebot/my-bot/plugins/peteralbus_wife/config.json"
+from .config import Config
 
-# 定义命令处理器，命令为 "jm"或"jm下载"或"JM"
-download = on_command("jm", aliases={"jm下载","JM"}, priority=5)
 
-#图片转换PDF
-def all2PDF(input_folder, pdfpath, pdfname):
-    start_time = time.time()
-    paht = input_folder
-    zimulu = []  # 子目录（里面为image）
-    image = []  # 子目录图集
-    sources = []  # pdf格式的图
+config = get_plugin_config(Config)
 
-    with os.scandir(paht) as entries:
-        for entry in entries:
-            if entry.is_dir():
-                zimulu.append(int(entry.name))
-    # 对数字进行排序
-    zimulu.sort()
+download = on_command(
+    "jm",
+    aliases={"jm下载", "JM"},
+    permission=GROUP,
+    priority=5,
+    block=True,
+)
 
-    for i in zimulu:
-        with os.scandir(paht + "/" + str(i)) as entries:
-            for entry in entries:
-                if entry.is_dir():
-                    print("这一级不应该有自录")
-                if entry.is_file():
-                    image.append(paht + "/" + str(i) + "/" + entry.name)
+_active_jobs: Set[str] = set()
+_download_semaphore = asyncio.Semaphore(
+    max(1, config.peteralbus_wife_jm_max_concurrency)
+)
 
-    if "jpg" in image[0]:
-        output = Image.open(image[0])
-        image.pop(0)
 
-    for file in image:
-        if "jpg" in file:
-            img_file = Image.open(file)
-            if img_file.mode == "RGB":
-                img_file = img_file.convert("RGB")
-            sources.append(img_file)
+def _resolve_option_path() -> Path:
+    option_path = Path(config.peteralbus_wife_jm_option_path).expanduser()
+    if not option_path.is_absolute():
+        option_path = Path(__file__).parent / option_path
+    return option_path.resolve()
 
-    pdf_file_path = pdfpath + "/" + pdfname
-    if pdf_file_path.endswith(".pdf") == False:
-        pdf_file_path = pdf_file_path + ".pdf"
-    output.save(pdf_file_path, "pdf", save_all=True, append_images=sources)
-    end_time = time.time()
-    run_time = end_time - start_time
-    print("运行时间：%3.2f 秒" % run_time)
 
-#下载事件处理
+def _is_within(path: Path, parent: Path) -> bool:
+    try:
+        path.resolve().relative_to(parent.resolve())
+        return True
+    except ValueError:
+        return False
+
+
+def _prepare_job(jm_code: str) -> Tuple[JmOption, Path, Path]:
+    option_path = _resolve_option_path()
+    if not option_path.is_file():
+        raise FileNotFoundError(f"JM 配置文件不存在: {option_path}")
+
+    option = create_option_by_file(str(option_path))
+    configured_work_dir = config.peteralbus_wife_jm_work_dir.strip()
+    if configured_work_dir:
+        work_root = Path(configured_work_dir).expanduser()
+        if not work_root.is_absolute():
+            work_root = Path(option.dir_rule.base_dir) / work_root
+    else:
+        work_root = Path(option.dir_rule.base_dir) / ".nonebot_tasks"
+
+    work_root = work_root.resolve()
+    work_root.mkdir(parents=True, exist_ok=True)
+    job_dir = (work_root / f"jm-{jm_code}-{uuid4().hex}").resolve()
+    if not _is_within(job_dir, work_root):
+        raise ValueError("JM 临时任务目录越过工作目录")
+    job_dir.mkdir()
+
+    # 每个命令使用独立根目录，避免并发任务扫描、覆盖或删除彼此文件。
+    option.dir_rule.base_dir = str(job_dir)
+    return option, work_root, job_dir
+
+
+def _cleanup_job_dir(job_dir: Path, work_root: Path) -> None:
+    if job_dir.is_dir() and _is_within(job_dir, work_root):
+        shutil.rmtree(job_dir)
+
+
+def _cleanup_stale_jobs(work_root: Path) -> None:
+    retention_hours = max(0, config.peteralbus_wife_jm_failed_retention_hours)
+    # 即使失败文件配置为不保留，也给正在运行的并发任务留出安全窗口。
+    cutoff = time.time() - max(1, retention_hours) * 3600
+    if not work_root.is_dir():
+        return
+
+    for child in work_root.iterdir():
+        try:
+            if (
+                child.is_dir()
+                and child.name.startswith("jm-")
+                and _is_within(child, work_root)
+                and child.stat().st_mtime < cutoff
+            ):
+                shutil.rmtree(child)
+        except OSError:
+            logger.exception("清理过期 JM 任务目录失败: {}", child)
+
+
+def _select_pdf_path(result, job_dir: Path) -> Path:
+    pdf_paths = [
+        Path(path).resolve()
+        for path in result.manifest.get_export_filepath_list("pdf")
+    ]
+    valid_paths = [
+        path for path in pdf_paths if path.is_file() and _is_within(path, job_dir)
+    ]
+    if len(valid_paths) != 1:
+        raise RuntimeError(
+            f"预期生成 1 个 PDF，实际找到 {len(valid_paths)} 个"
+        )
+    return valid_paths[0]
+
+
+def _format_public_error(error: BaseException) -> str:
+    message = " ".join(str(error).split())
+    if len(message) > 180:
+        message = f"{message[:177]}..."
+    return f"{type(error).__name__}: {message}" if message else type(error).__name__
+
+
+async def _send_status(message: str) -> None:
+    try:
+        await download.send(message)
+    except Exception:
+        logger.exception("发送 JM 任务状态失败: {}", message)
+
+
+def _is_allowed(event: GroupMessageEvent) -> bool:
+    allowed_groups = set(config.peteralbus_wife_jm_allowed_groups)
+    allowed_users = set(config.peteralbus_wife_jm_allowed_users)
+    return (
+        not allowed_groups or str(event.group_id) in allowed_groups
+    ) and (
+        not allowed_users or str(event.user_id) in allowed_users
+    )
+
+
 @download.handle()
-async def handle_first_receive(bot: Bot, event: Event, args: Message = CommandArg()):
+async def handle_jm_download(
+    bot: Bot,
+    event: GroupMessageEvent,
+    args: Message = CommandArg(),
+) -> None:
     jm_code = args.extract_plain_text().strip()
     if not jm_code.isdigit():
-        await download.finish("请提供要下载的 JM 号。")
-  
-    # 下载漫画
+        await download.finish("请提供要下载的 JM 号，例如：/jm 350234")
+    if not _is_allowed(event):
+        await download.finish("当前群聊或用户没有使用 JM 下载功能的权限。")
+    if jm_code in _active_jobs:
+        await download.finish(f"JM{jm_code} 已在下载中，请勿重复提交。")
+
+    _active_jobs.add(jm_code)
+    work_root: Optional[Path] = None
+    job_dir: Optional[Path] = None
+    upload_succeeded = False
+
     try:
-        await download.send(f"开始下载 JM 号 {jm_code} 的漫画，请稍候...")
-        manhua = {jm_code}
-        for id in manhua:
-            jmcomic.download_album(id,option)
+        if _download_semaphore.locked():
+            await _send_status(f"JM{jm_code} 已进入下载队列。")
+        else:
+            await _send_status(f"开始下载 JM{jm_code}，完成后将上传 PDF。")
 
-        with open(config, "r", encoding="utf8") as f:
-            data = yaml.load(f, Loader=yaml.FullLoader)
-            path = data["dir_rule"]["base_dir"]
+        async with _download_semaphore:
+            option, work_root, job_dir = _prepare_job(jm_code)
+            await asyncio.to_thread(_cleanup_stale_jobs, work_root)
 
-        with os.scandir(path) as entries:
-            for entry in entries:
-                if entry.is_dir():
-                    if os.path.exists(os.path.join(path +'/' +entry.name + ".pdf")):
-                        print("文件：《%s》 已存在，跳过" % entry.name)
-                        continue
-                    else:
-                        print("开始转换：%s " % entry.name)
-                        all2PDF(path + "/" + entry.name, path, entry.name)
-    except Exception as e:
-        print(e.stacktrace())
-        await download.finish(f"下载失败：{e}")
+            pdf_feature = Feature.export_pdf(
+                pdf_dir=str(job_dir / "pdf"),
+                filename_rule="[JM{Aid}] {Atitle}",
+                delete_original_file=False,
+            )
+            result = await asyncio.wait_for(
+                download_album_async(jm_code, option, extra=pdf_feature),
+                timeout=max(1, config.peteralbus_wife_jm_download_timeout),
+            )
+            pdf_path = _select_pdf_path(result, job_dir)
 
-    # 发送 PDF 文件到群聊
-    pdf_file_path = path + "/" + entry.name + ".pdf" 
-    album_dir = path + "/" + entry.name
-    try:
-        await bot.call_api("upload_group_file",
-                           group_id=event.group_id,
-                           file=pdf_file_path,
-                           name=os.path.basename(pdf_file_path))
-    except Exception as e:
-        await download.send(f"文件发送失败：{e}")
+            max_pdf_mb = max(0, config.peteralbus_wife_jm_max_pdf_mb)
+            if max_pdf_mb and pdf_path.stat().st_size > max_pdf_mb * 1024 * 1024:
+                raise RuntimeError(f"PDF 超过 {max_pdf_mb} MiB 的上传限制")
+
+            await asyncio.wait_for(
+                bot.call_api(
+                    "upload_group_file",
+                    group_id=event.group_id,
+                    file=str(pdf_path),
+                    name=pdf_path.name,
+                ),
+                timeout=max(1, config.peteralbus_wife_jm_upload_timeout),
+            )
+            upload_succeeded = True
+
+        logger.info(
+            "JM 下载并上传成功: jm_id={}, group_id={}, user_id={}, duration={:.2f}s",
+            jm_code,
+            event.group_id,
+            event.user_id,
+            result.duration or 0,
+        )
+        await _send_status(f"JM{jm_code} 下载并上传完成。")
+    except asyncio.TimeoutError:
+        logger.exception(
+            "JM 下载或上传超时: jm_id={}, group_id={}",
+            jm_code,
+            event.group_id,
+        )
+        await _send_status(f"JM{jm_code} 处理超时，请稍后重试。")
+    except Exception as error:
+        logger.exception(
+            "JM 下载或上传失败: jm_id={}, group_id={}",
+            jm_code,
+            event.group_id,
+        )
+        await _send_status(f"JM{jm_code} 处理失败：{_format_public_error(error)}")
     finally:
-        # 清理下载的文件和生成的 PDF
-        if os.path.exists(pdf_file_path):
-            os.remove(pdf_file_path)
-        if os.path.exists(album_dir):
-            shutil.rmtree(album_dir)
+        _active_jobs.discard(jm_code)
+        if job_dir is not None and work_root is not None:
+            retention_hours = max(
+                0, config.peteralbus_wife_jm_failed_retention_hours
+            )
+            if upload_succeeded or retention_hours == 0:
+                try:
+                    await asyncio.to_thread(_cleanup_job_dir, job_dir, work_root)
+                except Exception:
+                    logger.exception("清理 JM 任务目录失败: {}", job_dir)
+            else:
+                logger.warning(
+                    "JM 失败任务文件将保留 {} 小时: jm_id={}, task_dir={}",
+                    retention_hours,
+                    jm_code,
+                    job_dir,
+                )

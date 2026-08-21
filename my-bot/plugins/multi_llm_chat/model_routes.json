@@ -1,0 +1,68 @@
+{
+  "providers": {
+    "deepseek": {
+      "base_url": "https://api.deepseek.com",
+      "api_key_field": "llm_chat_deepseek_api_key"
+    },
+    "xiaomi_mimo": {
+      "base_url": "https://api.xiaomimimo.com/v1",
+      "api_key_field": "llm_chat_xiaomi_mimo_api_key",
+      "create_params": {
+        "stop": null,
+        "frequency_penalty": 0,
+        "presence_penalty": 0,
+        "extra_body": {
+          "thinking": {
+            "type": "disabled"
+          }
+        },
+        "tools": [
+          {
+            "type": "web_search",
+            "max_keyword": 3,
+            "force_search": false,
+            "limit": 1,
+            "user_location": {
+              "type": "approximate",
+              "country": "China",
+              "region": "Shanghai",
+              "city": "Shanghai"
+            }
+          }
+        ],
+        "tool_choice": "auto"
+      }
+    }
+  },
+  "models": {
+    "deepseek-v4-flash": {
+      "provider": "deepseek",
+      "create_params": {
+        "extra_body": {
+          "thinking": {
+            "type": "disabled"
+          }
+        }
+      }
+    },
+    "deepseek-v4-pro": {
+      "provider": "deepseek",
+      "create_params": {
+        "extra_body": {
+          "thinking": {
+            "type": "disabled"
+          }
+        }
+      }
+    },
+    "mimo-v2-pro": {
+      "provider": "xiaomi_mimo"
+    },
+    "mimo-v2-flash": {
+      "provider": "xiaomi_mimo"
+    },
+    "mimo-v2.5": {
+      "provider": "xiaomi_mimo"
+    }
+  }
+}

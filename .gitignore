@@ -1,4 +1,23 @@
-*.pyc
+# Python bytecode and tool caches
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Local environments and secrets
+.venv/
+venv/
+.env
+.env.*
+!.env.example
+
+# NoneBot runtime state
 *.pid
 *.log
-data/
+/data/
+/my-bot/plugins/multi_llm_chat/group_memories/
+**/.nonebot_tasks/
+
+# Accidental local artifact
+/File

@@ -1,5 +1,4 @@
 {
-  "version": "2.1",
   "log": true,
   "dir_rule": {
     "rule": "Bd_Atitle_Pindex",
@@ -12,24 +11,14 @@
       "suffix": ".jpg"
     },
     "threading": {
-      "image": 30,
-      "photo": 24
+      "image": 12,
+      "photo": 3
     }
   },
   "client": {
     "cache": null,
-    "domain": [],
-    "postman": {
-      "type": "cffi",
-      "meta_data": {
-        "impersonate": "chrome110",
-        "headers": null
-      }
-    },
     "impl": "api",
+    "async_impl": "async_api",
     "retry_times": 5
-  },
-  "plugins": {
-    "valid": "log"
   }
 }
