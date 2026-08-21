@@ -6,10 +6,14 @@ from nonebot.params import EventMessage
 from nonebot.log import logger
 import asyncio
 import json
-from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
 from datetime import datetime
+from pathlib import Path
+from time import perf_counter
+from typing import Any, Dict, List, Optional, Tuple
+from uuid import uuid4
+
 from .config import Config
+from .raw_request_store import append_raw_request, cleanup_raw_request_logs
 
 try:
     from openai import AsyncOpenAI
@@ -120,6 +124,14 @@ def _resolve_memory_dir_path() -> Path:
     if not path.is_absolute():
         path = Path(__file__).parent / path
     path.mkdir(parents=True, exist_ok=True)
+    return path
+
+
+def _resolve_raw_request_log_dir_path() -> Path:
+    log_dir = config.llm_chat_raw_request_log_dir.strip()
+    path = Path(log_dir or "llm_request_logs")
+    if not path.is_absolute():
+        path = Path(__file__).parent / path
     return path
 
 
@@ -251,7 +263,7 @@ async def _update_group_memory_if_full(group_id: str) -> None:
     memory_md = _read_group_memory(group_id)
     history_str = build_chat_history_str(recent_messages)
     update_messages = make_memory_update_messages(memory_md, history_str)
-    summary_md = await call_llm_api(update_messages)
+    summary_md = await call_llm_api(update_messages, request_type="memory_update")
     chat_cache[group_id]["messages"] = recent_messages[-send_limit:]
     if summary_md:
         _write_group_memory(group_id, summary_md.strip())
@@ -465,7 +477,7 @@ async def _should_skip_by_recent_bot_reply(bot, group_id: str, event_time: datet
     return False
 
 
-async def call_llm_api(messages: List[Dict]) -> Optional[str]:
+async def call_llm_api(messages: List[Dict], request_type: str) -> Optional[str]:
     if AsyncOpenAI is None:
         logger.error("openai 库未安装或不可用，无法调用模型。请安装依赖：openai")
         return None
@@ -484,8 +496,8 @@ async def call_llm_api(messages: List[Dict]) -> Optional[str]:
         _openai_client = AsyncOpenAI(api_key=api_key, base_url=base_url, timeout=request_timeout)
         _openai_client_params = params
 
-    logger.info(f"调用模型 API，base_url: {base_url}, model: {model}, 消息数: {len(messages)}")
-
+    request_id = uuid4().hex
+    started_at = perf_counter()
     try:
         request_messages: List[Dict] = messages
         if _is_xiaomi_mimo_model(model):
@@ -505,13 +517,49 @@ async def call_llm_api(messages: List[Dict]) -> Optional[str]:
             if _is_thinking_enabled(create_kwargs):
                 for field in ["temperature", "top_p", "presence_penalty", "frequency_penalty"]:
                     create_kwargs.pop(field, None)
-        logger.info(f"调用模型 API，参数: {create_kwargs}")
+        try:
+            await asyncio.to_thread(
+                append_raw_request,
+                _resolve_raw_request_log_dir_path(),
+                request_id,
+                request_type,
+                create_kwargs,
+            )
+        except (OSError, TypeError, ValueError) as error:
+            logger.error(
+                "保存大模型原始请求失败: request_id={}, request_type={}, error_type={}",
+                request_id,
+                request_type,
+                type(error).__name__,
+            )
+
+        logger.info(
+            "开始大模型请求: request_id={}, request_type={}, model={}, message_count={}",
+            request_id,
+            request_type,
+            model,
+            len(request_messages),
+        )
         result = await _openai_client.chat.completions.create(**create_kwargs)
         content = (result.choices[0].message.content or "").strip()
-        logger.info(f"API返回内容: {content}")
+        logger.info(
+            "完成大模型请求: request_id={}, request_type={}, model={}, elapsed_ms={}, response_chars={}",
+            request_id,
+            request_type,
+            model,
+            round((perf_counter() - started_at) * 1000),
+            len(content),
+        )
         return content
-    except Exception as e:
-        logger.error(f"API调用异常: {e}")
+    except Exception as error:
+        logger.error(
+            "大模型请求失败: request_id={}, request_type={}, model={}, elapsed_ms={}, error_type={}",
+            request_id,
+            request_type,
+            model,
+            round((perf_counter() - started_at) * 1000),
+            type(error).__name__,
+        )
         return None
 
 
@@ -535,29 +583,19 @@ async def process_chat_history(bot, group_id: str):
     # 检查最后一条消息是否是机器人自己的
     last_message = messages[-1]
     if last_message.get("user_id") == "bot":
-        # logger.info(f"最后一条消息是机器人自己的，跳过处理，group_id: {group_id}")
         return
-    
-    logger.info(f"开始处理聊天记录，group_id: {group_id}, 消息数: {len(messages)}")
     
     messages_for_send = _select_messages_for_send(messages)
     chat_history_str = build_chat_history_str(messages_for_send)
     group_memory_md = _read_group_memory(group_id)
     check_messages = make_check_messages(chat_history_str, group_memory_md)
     
-    # 询问大模型是否适合回复
-    logger.debug(f"询问大模型是否适合回复，发送的消息: {check_messages}")
-    should_reply = await call_llm_api(check_messages)
-    logger.info(f"大模型回复是否适合: {should_reply}")
+    should_reply = await call_llm_api(check_messages, request_type="reply_decision")
     
     if should_reply and "是" in should_reply:
-        logger.info("大模型认为适合回复")
         reply_messages = make_reply_messages(chat_history_str, group_memory_md)
         
-        # 生成回复
-        logger.debug(f"请求大模型生成回复，发送的消息: {reply_messages}")
-        reply = await call_llm_api(reply_messages)
-        logger.info(f"大模型生成的回复: {reply}")
+        reply = await call_llm_api(reply_messages, request_type="chat_reply")
         
         if reply:
             # 发送回复到群聊
@@ -577,19 +615,12 @@ async def process_chat_history(bot, group_id: str):
                 
                 if len(chat_cache[group_id]["messages"]) > _history_store_limit():
                     chat_cache[group_id]["messages"] = chat_cache[group_id]["messages"][-_history_store_limit():]
-                    logger.info(f"聊天记录超过最大长度，已截断到 {_history_store_limit()} 条")
                 await _update_group_memory_if_full(group_id)
                     
             except Exception as e:
                 logger.error(f"发送回复失败: {e}")
     else:
-        logger.info("大模型认为不适合回复")
-        # 设置 should_not_reply 标记为 True
         chat_cache[group_id]["should_not_reply"] = True
-        logger.info(f"已标记群聊 {group_id} 为不适合回复，直到收到新消息")
-    
-    # 不清理聊天记录，保留聊天历史
-    logger.info(f"已处理群聊 {group_id} 的聊天记录，保留聊天历史")
 
 
 @llm_chat.handle()
@@ -617,9 +648,6 @@ async def handle_message(
                 return
         text = render_message_content(event, message)
         
-        # 记录收到的消息
-        logger.info(f"收到群聊 {group_id} 用户 {user_id} 的消息: {text}")
-        
         # 初始化缓存
         if group_id not in chat_cache:
             chat_cache[group_id] = {
@@ -627,11 +655,8 @@ async def handle_message(
                 "last_update": datetime.now(),
                 "should_not_reply": False
             }
-            logger.info(f"为群聊 {group_id} 创建新的聊天缓存")
         else:
-            # 收到新消息，清除 should_not_reply 标记
             chat_cache[group_id]["should_not_reply"] = False
-            logger.info(f"收到新消息，清除群聊 {group_id} 的 should_not_reply 标记")
         
         # 更新聊天记录
         chat_cache[group_id]["messages"].append({
@@ -639,16 +664,12 @@ async def handle_message(
             "content": text,
             "user_id": user_id
         })
-        logger.info(f"已添加消息到群聊 {group_id} 的聊天记录，当前记录数: {len(chat_cache[group_id]['messages'])}")
-        
         if len(chat_cache[group_id]["messages"]) > _history_store_limit():
             chat_cache[group_id]["messages"] = chat_cache[group_id]["messages"][-_history_store_limit():]
-            logger.info(f"聊天记录超过最大长度，已截断到 {_history_store_limit()} 条")
         await _update_group_memory_if_full(group_id)
         
         # 更新最后更新时间
         chat_cache[group_id]["last_update"] = datetime.now()
-        logger.info(f"更新群聊 {group_id} 的最后消息时间")
 
 
 @llm_chat_mention.handle()
@@ -695,7 +716,7 @@ async def handle_mention_immediate(
         chat_history_str2 = build_chat_history_str(_select_messages_for_send(msgs))
         group_memory_md2 = _read_group_memory(group_id)
         reply_messages2 = make_reply_messages(chat_history_str2, group_memory_md2)
-        reply = await call_llm_api(reply_messages2)
+        reply = await call_llm_api(reply_messages2, request_type="mention_reply")
         if reply:
             try:
                 await bot.call_api(
@@ -750,8 +771,6 @@ async def clean_inactive_chat_history():
     current_time = datetime.now()
     inactive_groups = []
     
-    logger.info("开始清理长时间不活跃的聊天记录")
-    
     # 清理超过24小时不活跃的聊天记录
     for group_id, chat_info in list(chat_cache.items()):
         last_update = chat_info.get("last_update", datetime.now())
@@ -760,11 +779,28 @@ async def clean_inactive_chat_history():
         # 24小时 = 86400秒
         if time_diff > 86400:
             inactive_groups.append(group_id)
-            logger.info(f"群聊 {group_id} 超过24小时未活跃，清理聊天记录")
     
     # 清理不活跃的群聊
     for group_id in inactive_groups:
         del chat_cache[group_id]
-        logger.info(f"已清理群聊 {group_id} 的聊天记录")
-    
-    logger.info("清理长时间不活跃的聊天记录完成")
+    if inactive_groups:
+        logger.info("已清理不活跃群聊缓存: group_count={}", len(inactive_groups))
+
+
+@scheduler.scheduled_job("cron", hour=0, minute=10)
+async def clean_expired_raw_request_logs():
+    """清理超过保留期限的大模型原始请求日志。"""
+    try:
+        deleted_count = await asyncio.to_thread(
+            cleanup_raw_request_logs,
+            _resolve_raw_request_log_dir_path(),
+            config.llm_chat_raw_request_retention_days,
+        )
+    except OSError as error:
+        logger.error(
+            "清理大模型原始请求日志失败: error_type={}",
+            type(error).__name__,
+        )
+        return
+    if deleted_count:
+        logger.info("已清理过期大模型原始请求日志: file_count={}", deleted_count)

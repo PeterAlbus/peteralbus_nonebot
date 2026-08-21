@@ -17,6 +17,7 @@ venv/
 *.log
 /data/
 /my-bot/plugins/multi_llm_chat/group_memories/
+/my-bot/plugins/multi_llm_chat/llm_request_logs/
 **/.nonebot_tasks/
 
 # Accidental local artifact

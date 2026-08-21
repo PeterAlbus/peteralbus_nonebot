@@ -1,5 +1,6 @@
+from typing import List
+
 from pydantic import BaseModel
-from typing import List, Optional
 
 
 class Config(BaseModel):
@@ -13,10 +14,12 @@ class Config(BaseModel):
     llm_chat_request_timeout: int = 60
     llm_chat_routes_file: str = "model_routes.json"
     llm_chat_memory_dir: str = "group_memories"
-    
+    llm_chat_raw_request_log_dir: str = "llm_request_logs"
+    llm_chat_raw_request_retention_days: int = 7
+
     # 群聊白名单
     llm_chat_whitelist: List[str] = []
-    
+
     # 聊天记录配置
     llm_chat_timeout: int = 10  # 聊天记录超时时间（秒）
     llm_chat_max_history: int = 15  # 最大聊天记录条数
