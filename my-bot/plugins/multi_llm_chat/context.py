@@ -77,7 +77,7 @@ class ContextBuilder:
 
         fixed_size = serialized_message_chars(system_messages)
         available = max(1000, self._char_budget - fixed_size)
-        rendered_events = [
+        rendered_event_messages = [
             format_event_for_model(
                 event,
                 display_name=display_names.get(event.user_id or ""),
@@ -85,8 +85,8 @@ class ContextBuilder:
             )
             for event in state.recent_events
         ]
-        selected = select_recent_messages(
-            rendered_events,
+        selected = select_recent_event_messages(
+            rendered_event_messages,
             available_chars=available,
             minimum_count=self._recent_event_min_count,
         )
@@ -106,44 +106,52 @@ class ContextBuilder:
             split_at = max(1, len(events) - retained_count)
             return list(events[:split_at]), list(events[split_at:])
         rendered = [format_event_for_model(event) for event in events]
-        total = serialized_message_chars(rendered)
+        total = serialized_event_message_chars(rendered)
         if total <= self._char_budget:
             return [], list(events)
         target_recent_chars = max(2000, self._char_budget // 2)
         retained_count = self._recent_event_min_count
-        used = serialized_message_chars(rendered[-retained_count:])
+        used = serialized_event_message_chars(rendered[-retained_count:])
         index = len(events) - retained_count - 1
         while (
             index >= 0
-            and used + serialized_message_chars([rendered[index]])
+            and used + serialized_event_message_chars([rendered[index]])
             <= target_recent_chars
         ):
-            used += serialized_message_chars([rendered[index]])
+            used += serialized_event_message_chars([rendered[index]])
             retained_count += 1
             index -= 1
         split_at = len(events) - retained_count
         return list(events[:split_at]), list(events[split_at:])
 
 
-def select_recent_messages(
-    messages: Sequence[Dict[str, Any]],
+def select_recent_event_messages(
+    event_messages: Sequence[Sequence[Dict[str, Any]]],
     available_chars: int,
     minimum_count: int,
 ) -> List[Dict[str, Any]]:
-    if not messages:
+    if not event_messages:
         return []
-    selected: List[Dict[str, Any]] = []
+    selected: List[Sequence[Dict[str, Any]]] = []
     used = 0
-    for index in range(len(messages) - 1, -1, -1):
-        message = messages[index]
-        size = serialized_message_chars([message])
+    for index in range(len(event_messages) - 1, -1, -1):
+        messages = event_messages[index]
+        size = serialized_message_chars(messages)
         must_keep = len(selected) < minimum_count
         if not must_keep and used + size > available_chars:
             break
-        selected.append(message)
+        selected.append(messages)
         used += size
     selected.reverse()
-    return selected
+    return [message for messages in selected for message in messages]
+
+
+def serialized_event_message_chars(
+    event_messages: Sequence[Sequence[Dict[str, Any]]],
+) -> int:
+    return serialized_message_chars(
+        [message for messages in event_messages for message in messages]
+    )
 
 
 def serialized_message_chars(messages: Sequence[Dict[str, Any]]) -> int:

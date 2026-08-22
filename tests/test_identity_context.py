@@ -3,7 +3,7 @@ import json
 from datetime import datetime, timezone
 
 import pytest
-from multi_llm_chat.context import ContextBuilder
+from multi_llm_chat.context import ContextBuilder, select_recent_event_messages
 from multi_llm_chat.identity import GroupRosterService
 from multi_llm_chat.memory import GroupMemoryStore
 from multi_llm_chat.models import ChatEvent, ConversationState
@@ -114,10 +114,18 @@ async def test_onebot_roster_is_identity_source_for_structured_context(tmp_path)
     assert member_list_call == {"group_id": 100}
     assert any("明哥 [user_id=200]" in item["content"] for item in messages)
     assert any("人工初始称呼：明先生" in item["content"] for item in messages)
-    assert messages[-2]["role"] == "user"
-    assert messages[-2]["name"] == "qq_200"
+    assert messages[-4]["role"] == "system"
+    assert "2026-08-22T12:00:00+08:00" in messages[-4]["content"]
+    assert messages[-3]["role"] == "user"
+    assert messages[-3]["name"] == "qq_200"
+    assert messages[-3]["content"] == "今天吃什么"
+    assert messages[-2]["role"] == "system"
+    assert (
+        '"source_plugin":"nonebot_plugin_whateat_pic"'
+        in messages[-2]["content"]
+    )
     assert messages[-1]["role"] == "assistant"
-    assert "source=nonebot_plugin_whateat_pic" in messages[-1]["content"]
+    assert messages[-1]["content"] == "推荐吃面"
 
 
 def test_pinned_aliases_use_user_id_without_group_scope(tmp_path):
@@ -127,6 +135,25 @@ def test_pinned_aliases_use_user_id_without_group_scope(tmp_path):
 
     assert service.pinned_aliases("200") == ["明先生"]
     assert service.pinned_aliases("201") == []
+
+
+def test_context_window_keeps_event_metadata_and_body_together():
+    first = [
+        {"role": "system", "content": "first metadata"},
+        {"role": "user", "content": "first body"},
+    ]
+    second = [
+        {"role": "system", "content": "second metadata"},
+        {"role": "assistant", "content": "second body"},
+    ]
+
+    selected = select_recent_event_messages(
+        [first, second],
+        available_chars=1,
+        minimum_count=1,
+    )
+
+    assert selected == second
 
 
 @pytest.mark.asyncio
