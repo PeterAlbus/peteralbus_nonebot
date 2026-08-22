@@ -1,5 +1,52 @@
 {
   "version": 1,
-  "members": {},
-  "groups": {}
+  "members": {
+    "2997592724": {
+      "pinned_aliases": [
+        "PeterAlbus",
+        "Peter",
+        "PP",
+        "P大哥"
+      ]
+    },
+    "1044060742": {
+      "pinned_aliases": [
+        "Colorful",
+        "C老师"
+      ]
+    },
+    "694471794": {
+      "pinned_aliases": [
+        "htw",
+        "威朗普"
+      ]
+    },
+    "895025516": {
+      "pinned_aliases": [
+        "qdd",
+        "小钱"
+      ]
+    },
+    "747304709": {
+      "pinned_aliases": [
+        "姐",
+        "小苏"
+      ]
+    },
+    "858049679": {
+      "pinned_aliases": [
+        "xfz",
+        "徐大哥",
+        "凡智"
+      ]
+    }
+  },
+  "groups": {
+    "708695087": {
+      "append_user_id": true
+    },
+    "748245950": {
+      "append_user_id": true
+    }
+  }
 }
