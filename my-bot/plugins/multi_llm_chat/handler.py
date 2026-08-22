@@ -2,7 +2,7 @@ import asyncio
 from contextvars import ContextVar
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Dict, Optional
+from typing import Any, Dict, Optional, cast
 from uuid import uuid4
 
 from nonebot import get_bot, get_plugin_config, on_message, require
@@ -287,12 +287,12 @@ def _schedule_passive_reply(event: ChatEvent, self_id: str) -> None:
 async def _delayed_passive_reply(event: ChatEvent, self_id: str) -> None:
     try:
         await asyncio.sleep(max(0, config.llm_chat_timeout))
-        bot = get_bot(self_id)
+        bot = _get_connected_bot(self_id)
         await _process_reply(bot=bot, trigger_event=event, passive=True)
     except asyncio.CancelledError:
         return
     except Exception as error:
-        logger.error(
+        logger.opt(exception=error).error(
             "被动群聊处理失败: group_id={}, event_id={}, error_type={}",
             event.group_id,
             event.event_id,
@@ -394,7 +394,7 @@ def _ensure_roster_sync(self_id: str, group_id: str) -> None:
 
     async def sync() -> None:
         try:
-            bot = get_bot(self_id)
+            bot = _get_connected_bot(self_id)
             roster = await roster_service.get_roster(group_id)
             age = (datetime.now().astimezone() - roster.synced_at).total_seconds()
             if (
@@ -403,7 +403,7 @@ def _ensure_roster_sync(self_id: str, group_id: str) -> None:
             ):
                 await roster_service.sync_group(bot, group_id)
         except Exception as error:
-            logger.warning(
+            logger.opt(exception=error).warning(
                 "同步 OneBot 群成员失败: group_id={}, error_type={}",
                 group_id,
                 type(error).__name__,
@@ -451,6 +451,10 @@ def _cancel_passive_task(group_id: str) -> None:
 
 def _group_lock(group_id: str) -> asyncio.Lock:
     return _group_locks.setdefault(group_id, asyncio.Lock())
+
+
+def _get_connected_bot(self_id: Any) -> Bot:
+    return cast(Bot, get_bot(str(self_id)))
 
 
 def _event_id(event: GroupMessageEvent) -> str:
