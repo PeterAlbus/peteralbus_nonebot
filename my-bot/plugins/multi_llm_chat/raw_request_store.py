@@ -5,6 +5,7 @@ from pathlib import Path
 from typing import Any, Dict, Optional
 
 LOG_FILE_PREFIX = "llm-requests-"
+IMAGE_MIME_TYPES = ("image/jpeg", "image/png", "image/gif", "image/webp", "image/bmp")
 
 
 def append_raw_request(
@@ -23,7 +24,7 @@ def append_raw_request(
         "request_id": request_id,
         "request_type": request_type,
         "metadata": metadata or {},
-        "request": request_body,
+        "request": sanitize_raw_request(request_body),
     }
     encoded_record = (json.dumps(record, ensure_ascii=False) + "\n").encode("utf-8")
     file_descriptor = os.open(
@@ -36,6 +37,26 @@ def append_raw_request(
     finally:
         os.close(file_descriptor)
     return log_path
+
+
+def sanitize_raw_request(value: Any) -> Any:
+    if isinstance(value, dict):
+        return {key: sanitize_raw_request(item) for key, item in value.items()}
+    if isinstance(value, list):
+        return [sanitize_raw_request(item) for item in value]
+    if isinstance(value, tuple):
+        return [sanitize_raw_request(item) for item in value]
+    if isinstance(value, str):
+        for mime_type in IMAGE_MIME_TYPES:
+            prefix = f"data:{mime_type};base64,"
+            if value.startswith(prefix):
+                return {
+                    "$image_base64_omitted": {
+                        "mime_type": mime_type,
+                        "encoded_chars": len(value) - len(prefix),
+                    }
+                }
+    return value
 
 
 def cleanup_raw_request_logs(

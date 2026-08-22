@@ -40,6 +40,21 @@ class GroupRoster(StrictModel):
     members: Dict[str, RosterMember] = Field(default_factory=dict)
 
 
+class ImageResource(StrictModel):
+    media_key: str
+    mime_type: Literal[
+        "image/jpeg",
+        "image/png",
+        "image/gif",
+        "image/webp",
+        "image/bmp",
+    ]
+    size: int = Field(gt=0)
+    sha256: str = Field(min_length=64, max_length=64)
+    content_offset: int = Field(ge=0)
+    placeholder: str
+
+
 class ChatEvent(StrictModel):
     event_id: str
     source_event_id: Optional[str] = None
@@ -49,6 +64,7 @@ class ChatEvent(StrictModel):
     user_id: Optional[str] = None
     display_name: str = ""
     content: str
+    images: List[ImageResource] = Field(default_factory=list)
     sent_at: datetime
     to_me: bool = False
 

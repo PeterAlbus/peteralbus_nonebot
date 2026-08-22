@@ -1,4 +1,4 @@
-from typing import List
+from typing import List, Optional
 
 from pydantic import BaseModel, Field
 
@@ -13,6 +13,7 @@ class Config(BaseModel):
     llm_chat_temperature: float = 0.7
     llm_chat_max_tokens: int = 4096
     llm_chat_request_timeout: int = 60
+    llm_chat_image_understanding: Optional[bool] = None
     llm_chat_routes_file: str = "model_routes.json"
     llm_chat_state_dir: str = "state"
     llm_chat_identity_config_file: str = "identity_config.json"

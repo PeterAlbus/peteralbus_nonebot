@@ -42,6 +42,7 @@
   "models": {
     "deepseek-v4-flash": {
       "provider": "deepseek",
+      "supports_image_understanding": false,
       "create_params": {
         "extra_body": {
           "thinking": {
@@ -52,6 +53,7 @@
     },
     "deepseek-v4-pro": {
       "provider": "deepseek",
+      "supports_image_understanding": false,
       "create_params": {
         "extra_body": {
           "thinking": {
@@ -61,7 +63,8 @@
       }
     },
     "mimo-v2.5": {
-      "provider": "xiaomi_mimo"
+      "provider": "xiaomi_mimo",
+      "supports_image_understanding": true
     }
   }
 }

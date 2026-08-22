@@ -7,6 +7,7 @@ from pydantic import ValidationError
 from .context import ContextBuilder
 from .conversation import ConversationStore, summary_to_text
 from .identity import GroupRosterService
+from .media import ImageStore
 from .memory import GroupMemoryStore
 from .models import (
     ChatEvent,
@@ -26,6 +27,7 @@ class ConversationMaintainer:
         context_builder: ContextBuilder,
         conversation_store: ConversationStore,
         memory_store: GroupMemoryStore,
+        image_store: ImageStore,
         roster_service: GroupRosterService,
         summary_max_chars: int,
         logger: Any,
@@ -34,6 +36,7 @@ class ConversationMaintainer:
         self._context_builder = context_builder
         self._conversation_store = conversation_store
         self._memory_store = memory_store
+        self._image_store = image_store
         self._roster_service = roster_service
         self._summary_max_chars = max(1000, summary_max_chars)
         self._logger = logger
@@ -59,11 +62,16 @@ class ConversationMaintainer:
                 type(error).__name__,
             )
         summary = await self._compress(state, compressible, turn_id)
-        return await self._conversation_store.replace_compressed_history(
+        updated_state = await self._conversation_store.replace_compressed_history(
             group_id,
             summary,
             retained,
         )
+        await self._image_store.delete_compressed_images(
+            compressible,
+            updated_state.recent_events,
+        )
+        return updated_state
 
     async def _compress(
         self,
@@ -75,12 +83,17 @@ class ConversationMaintainer:
             "previous_summary": summary_to_text(state.rolling_summary),
             "events": [event.model_dump(mode="json") for event in events],
         }
+        content = await self._image_store.build_payload_content(
+            json.dumps(payload, ensure_ascii=False),
+            events,
+            self._provider.image_understanding_enabled(),
+        )
         turn = await self._provider.complete(
             messages=[
                 {"role": "system", "content": COMPRESSION_SYSTEM_PROMPT},
                 {
                     "role": "user",
-                    "content": json.dumps(payload, ensure_ascii=False),
+                    "content": content,
                 },
             ],
             request_type="conversation_compression",
@@ -107,15 +120,21 @@ class ConversationMaintainer:
         events: Sequence[ChatEvent],
         turn_id: str,
     ) -> None:
+        payload = json.dumps(
+            [event.model_dump(mode="json") for event in events],
+            ensure_ascii=False,
+        )
+        content = await self._image_store.build_payload_content(
+            payload,
+            events,
+            self._provider.image_understanding_enabled(),
+        )
         turn = await self._provider.complete(
             messages=[
                 {"role": "system", "content": MEMORY_MAINTENANCE_SYSTEM_PROMPT},
                 {
                     "role": "user",
-                    "content": json.dumps(
-                        [event.model_dump(mode="json") for event in events],
-                        ensure_ascii=False,
-                    ),
+                    "content": content,
                 },
             ],
             request_type="memory_maintenance",

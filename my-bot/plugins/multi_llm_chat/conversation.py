@@ -2,7 +2,7 @@ import asyncio
 import json
 from datetime import datetime
 from pathlib import Path
-from typing import Dict, List, Optional, Sequence
+from typing import Any, Dict, List, Optional, Sequence
 
 from .json_store import atomic_write_json_model, load_json_model
 from .models import ChatEvent, ConversationState, ConversationSummary
@@ -91,14 +91,18 @@ def format_event_for_model(
     event: ChatEvent,
     display_name: Optional[str] = None,
     append_user_id: bool = False,
-) -> List[Dict[str, str]]:
+    content: Optional[Any] = None,
+) -> List[Dict[str, Any]]:
     metadata = {
         "sent_at": event.sent_at.astimezone().isoformat(),
     }
     if event.source.startswith("plugin:"):
         metadata["source_plugin"] = event.source.removeprefix("plugin:")
     if event.role == "assistant":
-        message = {"role": "assistant", "content": event.content}
+        message = {
+            "role": "assistant",
+            "content": event.content if content is None else content,
+        }
         return [_metadata_message(metadata), message]
 
     name = display_name or event.display_name or f"用户{event.user_id or 'unknown'}"
@@ -111,7 +115,7 @@ def format_event_for_model(
     message = {
         "role": "user",
         "name": f"qq_{event.user_id}" if event.user_id else "qq_unknown",
-        "content": event.content,
+        "content": event.content if content is None else content,
     }
     return [_metadata_message(metadata), message]
 

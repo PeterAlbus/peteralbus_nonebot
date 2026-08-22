@@ -2,7 +2,7 @@ import asyncio
 from contextvars import ContextVar
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Dict, Optional, cast
+from typing import Any, Dict, List, Optional, Tuple, cast
 from uuid import uuid4
 
 from nonebot import get_bot, get_plugin_config, on_message, require
@@ -21,8 +21,9 @@ from .context import ContextBuilder
 from .conversation import ConversationStore
 from .identity import GroupRosterService
 from .maintenance import ConversationMaintainer
+from .media import ImageDownloadError, ImageStore
 from .memory import GroupMemoryStore
-from .models import ChatEvent, ConversationState, ReplyDecision
+from .models import ChatEvent, ConversationState, ImageResource, ReplyDecision
 from .prompts import PASSIVE_DECISION_SYSTEM_PROMPT
 from .provider import LLMProvider
 from .raw_request_store import cleanup_raw_request_logs
@@ -75,6 +76,7 @@ cli_workspace_dir = _resolve_plugin_path(
 conversation_store = ConversationStore(
     state_dir=state_dir,
 )
+image_store = ImageStore(state_dir=state_dir)
 roster_service = GroupRosterService(
     state_dir=state_dir,
     identity_config_path=identity_config_path,
@@ -93,6 +95,7 @@ provider = LLMProvider(
 context_builder = ContextBuilder(
     roster_service=roster_service,
     memory_store=memory_store,
+    image_store=image_store,
     char_budget=config.llm_chat_context_char_budget,
     recent_event_min_count=config.llm_chat_recent_event_min_count,
     max_events=config.llm_chat_conversation_max_events,
@@ -122,6 +125,7 @@ conversation_maintainer = ConversationMaintainer(
     context_builder=context_builder,
     conversation_store=conversation_store,
     memory_store=memory_store,
+    image_store=image_store,
     roster_service=roster_service,
     summary_max_chars=config.llm_chat_summary_max_chars,
     logger=logger,
@@ -249,20 +253,23 @@ async def handle_mention_immediate(
 async def _ingest_event(event: GroupMessageEvent, message: Message) -> ChatEvent:
     group_id = str(event.group_id)
     user_id = str(event.user_id)
+    event_id = _event_id(event)
     async with _group_lock(group_id):
+        content, images = await ingest_message_content(message, event_id)
         member = await roster_service.update_from_sender(
             group_id=group_id,
             user_id=user_id,
             sender=event.sender,
         )
         chat_event = ChatEvent(
-            event_id=_event_id(event),
+            event_id=event_id,
             group_id=group_id,
             role="user",
             source="onebot",
             user_id=user_id,
             display_name=roster_service.render_member_name(member, user_id),
-            content=render_message_content(message),
+            content=content,
+            images=images,
             sent_at=_event_datetime(event),
             to_me=bool(getattr(event, "to_me", False)),
         )
@@ -326,6 +333,7 @@ async def _process_reply(
                 trigger_event.group_id,
                 state,
                 extra_system_prompt=PASSIVE_DECISION_SYSTEM_PROMPT,
+                include_images=provider.image_understanding_enabled(),
             )
             decision_turn = await provider.complete(
                 messages=decision_messages,
@@ -349,7 +357,11 @@ async def _process_reply(
         if reply_tracker.has_external_reply(trigger_event.event_id, PLUGIN_NAME):
             return
         state = await conversation_store.get(trigger_event.group_id)
-        agent_messages = await context_builder.build(trigger_event.group_id, state)
+        agent_messages = await context_builder.build(
+            trigger_event.group_id,
+            state,
+            include_images=provider.image_understanding_enabled(),
+        )
         result = await agent_runner.run(
             messages=agent_messages,
             turn_id=uuid4().hex,
@@ -472,31 +484,77 @@ def _event_datetime(event: GroupMessageEvent) -> datetime:
 
 
 def render_message_content(message: Message) -> str:
-    parts = []
+    return "".join(_render_segment(segment) for segment in message).strip()
+
+
+async def ingest_message_content(
+    message: Message,
+    media_namespace: str,
+) -> Tuple[str, List[ImageResource]]:
+    parts: List[str] = []
+    images: List[ImageResource] = []
+    raw_length = 0
     for segment in message:
-        if segment.type == "text":
-            parts.append(str(segment.data.get("text", "")))
-        elif segment.type == "at":
-            target = str(segment.data.get("qq", ""))
-            parts.append("@全体成员" if target == "all" else f"@用户{target}")
-        elif segment.type == "image":
-            summary = str(segment.data.get("summary", "") or "")
-            parts.append(f"[图片{f':{summary}' if summary else ''}]")
-        elif segment.type == "face":
-            parts.append(f"[表情:{segment.data.get('id', '')}]")
-        elif segment.type == "record":
-            parts.append("[语音]")
-        elif segment.type == "video":
-            parts.append("[视频]")
-        elif segment.type == "file":
-            parts.append("[文件]")
-        elif segment.type == "node":
-            parts.append("[转发消息]")
-        elif segment.type == "json":
-            parts.append("[卡片消息]")
-        else:
-            parts.append(f"[{segment.type}]")
-    return "".join(parts).strip()
+        rendered = _render_segment(segment)
+        if segment.type == "image":
+            url = str(segment.data.get("url", "") or "").strip()
+            if url:
+                try:
+                    images.append(
+                        await image_store.download(
+                            url,
+                            placeholder=rendered,
+                            content_offset=raw_length,
+                            media_namespace=media_namespace,
+                        )
+                    )
+                except ImageDownloadError as error:
+                    logger.warning(
+                        "接收图片失败: file={}, error_type={}",
+                        str(segment.data.get("file", "") or ""),
+                        type(error).__name__,
+                    )
+            else:
+                logger.warning(
+                    "接收图片缺少下载地址: file={}",
+                    str(segment.data.get("file", "") or ""),
+                )
+        parts.append(rendered)
+        raw_length += len(rendered)
+    raw_content = "".join(parts)
+    leading_whitespace = len(raw_content) - len(raw_content.lstrip())
+    content = raw_content.strip()
+    adjusted_images = [
+        image.model_copy(
+            update={"content_offset": image.content_offset - leading_whitespace}
+        )
+        for image in images
+    ]
+    return content, adjusted_images
+
+
+def _render_segment(segment: Any) -> str:
+    if segment.type == "text":
+        return str(segment.data.get("text", ""))
+    if segment.type == "at":
+        target = str(segment.data.get("qq", ""))
+        return "@全体成员" if target == "all" else f"@用户{target}"
+    if segment.type == "image":
+        summary = str(segment.data.get("summary", "") or "")
+        return f"[图片{f':{summary}' if summary else ''}]"
+    if segment.type == "face":
+        return f"[表情:{segment.data.get('id', '')}]"
+    if segment.type == "record":
+        return "[语音]"
+    if segment.type == "video":
+        return "[视频]"
+    if segment.type == "file":
+        return "[文件]"
+    if segment.type == "node":
+        return "[转发消息]"
+    if segment.type == "json":
+        return "[卡片消息]"
+    return f"[{segment.type}]"
 
 
 def _render_outgoing_message(message: Any) -> str:

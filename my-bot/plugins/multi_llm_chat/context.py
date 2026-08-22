@@ -4,6 +4,7 @@ from typing import Any, Dict, List, Sequence, Tuple
 
 from .conversation import format_event_for_model, summary_to_text
 from .identity import GroupRosterService
+from .media import ImageStore
 from .memory import GroupMemoryStore
 from .models import ChatEvent, ConversationState
 from .prompts import PERSONA_SYSTEM_PROMPT
@@ -14,12 +15,14 @@ class ContextBuilder:
         self,
         roster_service: GroupRosterService,
         memory_store: GroupMemoryStore,
+        image_store: ImageStore,
         char_budget: int,
         recent_event_min_count: int,
         max_events: int,
     ) -> None:
         self._roster_service = roster_service
         self._memory_store = memory_store
+        self._image_store = image_store
         self._char_budget = max(4000, char_budget)
         self._recent_event_min_count = max(1, recent_event_min_count)
         self._max_events = max(self._recent_event_min_count + 1, max_events)
@@ -29,6 +32,7 @@ class ContextBuilder:
         group_id: str,
         state: ConversationState,
         extra_system_prompt: str = "",
+        include_images: bool = False,
     ) -> List[Dict[str, Any]]:
         relevant_user_ids = {
             event.user_id for event in state.recent_events if event.user_id is not None
@@ -85,11 +89,28 @@ class ContextBuilder:
             )
             for event in state.recent_events
         ]
-        selected = select_recent_event_messages(
+        selected_text_messages = select_recent_event_messages(
             rendered_event_messages,
             available_chars=available,
             minimum_count=self._recent_event_min_count,
         )
+        selected_event_count = sum(
+            1 for message in selected_text_messages if message.get("role") != "system"
+        )
+        selected_events = (
+            state.recent_events[-selected_event_count:] if selected_event_count else []
+        )
+        selected: List[Dict[str, Any]] = []
+        for event in selected_events:
+            content = await self._image_store.build_content(event, include_images)
+            selected.extend(
+                format_event_for_model(
+                    event,
+                    display_name=display_names.get(event.user_id or ""),
+                    append_user_id=identity_config.append_user_id,
+                    content=content,
+                )
+            )
         return [*system_messages, *selected]
 
     def split_for_compression(

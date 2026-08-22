@@ -74,6 +74,13 @@ class LLMProvider:
             self._client_params = params
         return self._client
 
+    def image_understanding_enabled(self) -> bool:
+        _, _, model_config = self._resolve_model()
+        configured = self._config.llm_chat_image_understanding
+        if configured is not None:
+            return bool(configured)
+        return bool(model_config.get("supports_image_understanding", False))
+
     async def complete(
         self,
         messages: Sequence[Dict[str, Any]],

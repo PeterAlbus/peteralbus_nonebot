@@ -5,6 +5,7 @@ from datetime import datetime, timezone
 import pytest
 from multi_llm_chat.context import ContextBuilder, select_recent_event_messages
 from multi_llm_chat.identity import GroupRosterService
+from multi_llm_chat.media import ImageStore
 from multi_llm_chat.memory import GroupMemoryStore
 from multi_llm_chat.models import ChatEvent, ConversationState
 
@@ -47,14 +48,8 @@ def write_identity_config(path):
         json.dumps(
             {
                 "version": 1,
-                "members": {
-                    "200": {"pinned_aliases": ["明先生"]}
-                },
-                "groups": {
-                    "100": {
-                        "append_user_id": True
-                    }
-                },
+                "members": {"200": {"pinned_aliases": ["明先生"]}},
+                "groups": {"100": {"append_user_id": True}},
             },
             ensure_ascii=False,
         ),
@@ -73,6 +68,7 @@ async def test_onebot_roster_is_identity_source_for_structured_context(tmp_path)
     builder = ContextBuilder(
         roster_service,
         memory_store,
+        ImageStore(tmp_path),
         char_budget=8000,
         recent_event_min_count=2,
         max_events=10,
@@ -120,10 +116,7 @@ async def test_onebot_roster_is_identity_source_for_structured_context(tmp_path)
     assert messages[-3]["name"] == "qq_200"
     assert messages[-3]["content"] == "今天吃什么"
     assert messages[-2]["role"] == "system"
-    assert (
-        '"source_plugin":"nonebot_plugin_whateat_pic"'
-        in messages[-2]["content"]
-    )
+    assert '"source_plugin":"nonebot_plugin_whateat_pic"' in messages[-2]["content"]
     assert messages[-1]["role"] == "assistant"
     assert messages[-1]["content"] == "推荐吃面"
 

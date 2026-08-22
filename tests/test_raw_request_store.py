@@ -53,6 +53,42 @@ class RawRequestStoreTest(unittest.TestCase):
             ],
         )
 
+    def test_append_raw_request_omits_image_base64_payload(self):
+        request_body = {
+            "messages": [
+                {
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "image_url",
+                            "image_url": {"url": "data:image/png;base64,aGVsbG8="},
+                        }
+                    ],
+                }
+            ]
+        }
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            log_path = append_raw_request(
+                directory=Path(temp_dir),
+                request_id="request-image",
+                request_type="chat_reply",
+                request_body=request_body,
+            )
+            record = json.loads(log_path.read_text(encoding="utf-8"))
+
+        logged_url = record["request"]["messages"][0]["content"][0]["image_url"]["url"]
+        self.assertEqual(
+            logged_url,
+            {
+                "$image_base64_omitted": {
+                    "mime_type": "image/png",
+                    "encoded_chars": 8,
+                }
+            },
+        )
+        self.assertNotIn("aGVsbG8=", json.dumps(record))
+
     def test_cleanup_deletes_only_logs_older_than_retention_window(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             directory = Path(temp_dir)
