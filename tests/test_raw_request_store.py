@@ -6,13 +6,12 @@ import unittest
 from datetime import date, datetime, timezone
 from pathlib import Path
 
-
 PLUGIN_DIR = (
     Path(__file__).resolve().parents[1] / "my-bot" / "plugins" / "multi_llm_chat"
 )
 sys.path.insert(0, str(PLUGIN_DIR))
 
-from raw_request_store import append_raw_request, cleanup_raw_request_logs
+from raw_request_store import append_raw_request, cleanup_raw_request_logs  # noqa: E402
 
 
 class RawRequestStoreTest(unittest.TestCase):
@@ -20,7 +19,7 @@ class RawRequestStoreTest(unittest.TestCase):
         recorded_at = datetime(2026, 8, 22, 12, 30, tzinfo=timezone.utc)
         request_body = {
             "model": "test-model",
-            "messages": [{"role": "user", "content": "群聊记忆 Markdown"}],
+            "messages": [{"role": "user", "content": "结构化记忆 patch"}],
             "stream": False,
         }
 
@@ -28,7 +27,7 @@ class RawRequestStoreTest(unittest.TestCase):
             log_path = append_raw_request(
                 directory=Path(temp_dir),
                 request_id="request-1",
-                request_type="memory_update",
+                request_type="memory_maintenance",
                 request_body=request_body,
                 now=recorded_at,
             )
@@ -47,7 +46,8 @@ class RawRequestStoreTest(unittest.TestCase):
                 {
                     "recorded_at": "2026-08-22T12:30:00+00:00",
                     "request_id": "request-1",
-                    "request_type": "memory_update",
+                    "request_type": "memory_maintenance",
+                    "metadata": {},
                     "request": request_body,
                 }
             ],

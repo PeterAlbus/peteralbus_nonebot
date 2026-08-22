@@ -1,3 +1,7 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
 [project]
 name = "my-bot"
 version = "0.1.0"
@@ -8,8 +12,22 @@ dependencies = [
     "aiohttp",
     "img2pdf>=0.5.1,<0.7",
     "jmcomic==2.7.4",
-    "nonebot-plugin-apscheduler"
+    "nonebot2[fastapi]>=2.4,<3",
+    "nonebot-adapter-onebot>=2.4,<3",
+    "nonebot-plugin-apscheduler",
+    "openai>=1.0,<3",
+    "pydantic>=2.7,<3"
 ]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8,<9",
+    "pytest-asyncio>=0.23,<1",
+    "ruff>=0.12,<1"
+]
+
+[tool.setuptools]
+packages = []
 
 [tool.nonebot]
 adapters = [

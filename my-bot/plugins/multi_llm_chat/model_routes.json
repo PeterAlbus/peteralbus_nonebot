@@ -1,12 +1,17 @@
 {
   "providers": {
     "deepseek": {
-      "base_url": "https://api.deepseek.com",
-      "api_key_field": "llm_chat_deepseek_api_key"
+      "base_url": "https://api.deepseek.com/beta",
+      "api_key_field": "llm_chat_deepseek_api_key",
+      "supports_tools": true,
+      "supports_strict_tools": true
     },
     "xiaomi_mimo": {
       "base_url": "https://api.xiaomimimo.com/v1",
       "api_key_field": "llm_chat_xiaomi_mimo_api_key",
+      "supports_tools": true,
+      "supports_strict_tools": true,
+      "max_tokens_field": "max_completion_tokens",
       "create_params": {
         "stop": null,
         "frequency_penalty": 0,
@@ -54,12 +59,6 @@
           }
         }
       }
-    },
-    "mimo-v2-pro": {
-      "provider": "xiaomi_mimo"
-    },
-    "mimo-v2-flash": {
-      "provider": "xiaomi_mimo"
     },
     "mimo-v2.5": {
       "provider": "xiaomi_mimo"

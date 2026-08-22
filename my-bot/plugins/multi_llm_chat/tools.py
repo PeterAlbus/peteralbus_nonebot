@@ -1,0 +1,398 @@
+import asyncio
+import copy
+import importlib
+import json
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Any, Awaitable, Callable, Dict, List, Optional, Type
+
+from pydantic import BaseModel, ConfigDict, Field, ValidationError
+
+from .cli_runner import DockerCliRunner
+from .identity import GroupRosterService
+from .memory import GroupMemoryStore, normalize_memory_text
+from .provider import LLMProvider
+
+
+class ToolArguments(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+
+class EmptyArguments(ToolArguments):
+    pass
+
+
+class MemberArguments(ToolArguments):
+    user_id: str
+
+
+class MemorySearchArguments(ToolArguments):
+    query: str = Field(min_length=1, max_length=100)
+
+
+class CliArguments(ToolArguments):
+    command: str = Field(min_length=1, max_length=4000)
+    timeout_seconds: Optional[int] = Field(default=None, ge=1, le=120)
+
+
+@dataclass(frozen=True)
+class ToolContext:
+    turn_id: str
+    group_id: str
+    triggering_user_id: str
+    bot: Any
+    workspace: Path
+
+
+ToolExecutor = Callable[[ToolContext, BaseModel], Awaitable[Any]]
+
+
+@dataclass(frozen=True)
+class ToolDefinition:
+    name: str
+    description: str
+    arguments_model: Type[BaseModel]
+    executor: ToolExecutor
+    timeout_seconds: int
+
+    def api_schema(self) -> Dict[str, Any]:
+        return {
+            "type": "function",
+            "function": {
+                "name": self.name,
+                "description": self.description,
+                "parameters": strict_model_json_schema(self.arguments_model),
+                "strict": True,
+            },
+        }
+
+
+class ToolRegistry:
+    def __init__(self, output_max_chars: int) -> None:
+        self._definitions: Dict[str, ToolDefinition] = {}
+        self._output_max_chars = max(1000, output_max_chars)
+
+    def register(self, definition: ToolDefinition) -> None:
+        if definition.name in self._definitions:
+            raise ValueError(f"工具名称重复: {definition.name}")
+        schema = definition.arguments_model.model_json_schema()
+        if schema.get("additionalProperties") is not False:
+            raise ValueError(f"工具参数模型必须设置 extra='forbid': {definition.name}")
+        self._definitions[definition.name] = definition
+
+    def schemas(self) -> List[Dict[str, Any]]:
+        return [definition.api_schema() for definition in self._definitions.values()]
+
+    async def execute(
+        self,
+        name: str,
+        raw_arguments: str,
+        context: ToolContext,
+    ) -> str:
+        definition = self._definitions.get(name)
+        if definition is None:
+            return _json_result(False, error=f"未注册工具: {name}")
+        try:
+            arguments = definition.arguments_model.model_validate_json(raw_arguments)
+        except ValidationError as error:
+            return _json_result(False, error=f"工具参数校验失败: {error}")
+        try:
+            result = await asyncio.wait_for(
+                definition.executor(context, arguments),
+                timeout=definition.timeout_seconds,
+            )
+        except asyncio.TimeoutError:
+            return _json_result(False, error="工具执行超时")
+        except Exception as error:
+            return _json_result(False, error=f"工具执行失败: {type(error).__name__}")
+        payload = _json_result(True, data=result)
+        if len(payload) <= self._output_max_chars:
+            return payload
+        return _json_result(
+            True,
+            data={
+                "output": payload[: self._output_max_chars],
+                "truncated": True,
+            },
+        )
+
+
+def register_custom_tool_module(registry: ToolRegistry, module_name: str) -> None:
+    normalized = module_name.strip()
+    if not normalized:
+        return
+    module = importlib.import_module(normalized)
+    register_tools = getattr(module, "register_tools", None)
+    if not callable(register_tools):
+        raise TypeError(f"自定义工具模块缺少 register_tools(registry): {normalized}")
+    register_tools(registry)
+
+
+def strict_model_json_schema(model: Type[BaseModel]) -> Dict[str, Any]:
+    schema = copy.deepcopy(model.model_json_schema())
+    definitions = schema.pop("$defs", {})
+    schema = _inline_json_schema_references(schema, definitions)
+    _make_json_schema_strict(schema)
+    return schema
+
+
+def _inline_json_schema_references(
+    value: Any,
+    definitions: Dict[str, Any],
+) -> Any:
+    if isinstance(value, dict):
+        reference = value.get("$ref")
+        if isinstance(reference, str) and reference.startswith("#/$defs/"):
+            definition_name = reference.removeprefix("#/$defs/")
+            if definition_name not in definitions:
+                raise ValueError(f"JSON Schema 引用了未知定义: {definition_name}")
+            resolved = copy.deepcopy(definitions[definition_name])
+            resolved.update({key: item for key, item in value.items() if key != "$ref"})
+            return _inline_json_schema_references(resolved, definitions)
+        return {
+            key: _inline_json_schema_references(item, definitions)
+            for key, item in value.items()
+        }
+    if isinstance(value, list):
+        return [_inline_json_schema_references(item, definitions) for item in value]
+    return value
+
+
+def _make_json_schema_strict(value: Any) -> None:
+    if isinstance(value, dict):
+        for unsupported_keyword in (
+            "default",
+            "title",
+            "minLength",
+            "maxLength",
+            "minimum",
+            "maximum",
+            "exclusiveMinimum",
+            "exclusiveMaximum",
+            "multipleOf",
+            "minItems",
+            "maxItems",
+        ):
+            value.pop(unsupported_keyword, None)
+        if value.get("type") == "object" or "properties" in value:
+            properties = value.get("properties", {})
+            value["additionalProperties"] = False
+            value["required"] = list(properties)
+        for nested in value.values():
+            _make_json_schema_strict(nested)
+        return
+    if isinstance(value, list):
+        for nested in value:
+            _make_json_schema_strict(nested)
+
+
+@dataclass(frozen=True)
+class AgentRunResult:
+    content: str
+    tool_steps: int
+
+
+class AgentRunner:
+    def __init__(
+        self,
+        provider: LLMProvider,
+        registry: ToolRegistry,
+        cli_runner: DockerCliRunner,
+        max_steps: int,
+    ) -> None:
+        self._provider = provider
+        self._registry = registry
+        self._cli_runner = cli_runner
+        self._max_steps = max(1, max_steps)
+
+    async def run(
+        self,
+        messages: List[Dict[str, Any]],
+        turn_id: str,
+        group_id: str,
+        triggering_user_id: str,
+        bot: Any,
+    ) -> AgentRunResult:
+        workspace = self._cli_runner.create_workspace(turn_id)
+        context = ToolContext(
+            turn_id=turn_id,
+            group_id=group_id,
+            triggering_user_id=triggering_user_id,
+            bot=bot,
+            workspace=workspace,
+        )
+        conversation = list(messages)
+        try:
+            for step in range(self._max_steps + 1):
+                turn = await self._provider.complete(
+                    messages=conversation,
+                    request_type="chat_agent",
+                    turn_id=turn_id,
+                    step=step,
+                    tools=self._registry.schemas(),
+                    tool_choice="auto",
+                    allow_builtin_tools=True,
+                )
+                if not turn.tool_calls:
+                    return AgentRunResult(content=turn.content, tool_steps=step)
+                if step >= self._max_steps:
+                    raise RuntimeError("大模型工具调用超过最大轮次")
+                conversation.append(turn.as_message())
+                for tool_call in turn.tool_calls:
+                    result = await self._registry.execute(
+                        tool_call.function.name,
+                        tool_call.function.arguments,
+                        context,
+                    )
+                    conversation.append(
+                        {
+                            "role": "tool",
+                            "tool_call_id": tool_call.id,
+                            "content": result,
+                        }
+                    )
+            raise RuntimeError("大模型工具调用没有产生最终回复")
+        finally:
+            await asyncio.to_thread(self._cli_runner.remove_workspace, workspace)
+
+
+def build_default_tool_registry(
+    roster_service: GroupRosterService,
+    memory_store: GroupMemoryStore,
+    cli_runner: DockerCliRunner,
+    tool_timeout_seconds: int,
+    output_max_chars: int,
+) -> ToolRegistry:
+    registry = ToolRegistry(output_max_chars=output_max_chars)
+
+    async def get_group_info(context: ToolContext, arguments: BaseModel) -> Any:
+        roster = await roster_service.get_roster(context.group_id)
+        return {
+            "group_id": roster.group_id,
+            "group_name": roster.group_name,
+            "member_count": len(roster.members),
+            "synced_at": roster.synced_at.isoformat(),
+        }
+
+    async def list_group_members(context: ToolContext, arguments: BaseModel) -> Any:
+        roster = await roster_service.get_roster(context.group_id)
+        return [
+            {
+                "user_id": member.user_id,
+                "nickname": member.nickname,
+                "card": member.card,
+                "role": member.role,
+            }
+            for member in roster.members.values()
+        ]
+
+    async def get_group_member(context: ToolContext, arguments: BaseModel) -> Any:
+        member_args = MemberArguments.model_validate(arguments.model_dump())
+        member = await roster_service.get_member(
+            context.bot,
+            context.group_id,
+            member_args.user_id,
+            refresh=True,
+        )
+        if member is None:
+            return {"found": False}
+        return {"found": True, **member.model_dump(mode="json")}
+
+    async def search_memory(context: ToolContext, arguments: BaseModel) -> Any:
+        search_args = MemorySearchArguments.model_validate(arguments.model_dump())
+        query = normalize_memory_text(search_args.query)
+        memory = await memory_store.get(context.group_id)
+        matches: List[Dict[str, Any]] = []
+        for user_id, member in memory.members.items():
+            for alias in member.learned_aliases:
+                if query in normalize_memory_text(alias.value):
+                    matches.append(
+                        {"type": "alias", "user_id": user_id, "value": alias.value}
+                    )
+            for attribute in [*member.traits, *member.interests]:
+                if query in normalize_memory_text(attribute.value):
+                    matches.append(
+                        {
+                            "type": "member_attribute",
+                            "user_id": user_id,
+                            "value": attribute.value,
+                        }
+                    )
+        for fact in memory.recent_facts:
+            if query in normalize_memory_text(fact.content):
+                matches.append(
+                    {
+                        "type": "fact",
+                        "id": fact.id,
+                        "content": fact.content,
+                        "involved_user_ids": fact.involved_user_ids,
+                        "last_confirmed_at": fact.last_confirmed_at.isoformat(),
+                    }
+                )
+        return matches[:20]
+
+    async def run_cli(context: ToolContext, arguments: BaseModel) -> Any:
+        cli_args = CliArguments.model_validate(arguments.model_dump())
+        result = await cli_runner.run(
+            cli_args.command,
+            context.workspace,
+            timeout_seconds=cli_args.timeout_seconds,
+        )
+        return {
+            "exit_code": result.exit_code,
+            "stdout": result.stdout,
+            "stderr": result.stderr,
+            "timed_out": result.timed_out,
+            "truncated": result.truncated,
+        }
+
+    for definition in (
+        ToolDefinition(
+            name="get_current_group_info",
+            description="获取当前群的名称、成员数量和成员快照更新时间。",
+            arguments_model=EmptyArguments,
+            executor=get_group_info,
+            timeout_seconds=tool_timeout_seconds,
+        ),
+        ToolDefinition(
+            name="list_current_group_members",
+            description="列出当前群的成员 QQ 号、昵称、群名片和群角色。",
+            arguments_model=EmptyArguments,
+            executor=list_group_members,
+            timeout_seconds=tool_timeout_seconds,
+        ),
+        ToolDefinition(
+            name="get_current_group_member",
+            description="通过 QQ user_id 获取当前群中某位成员的最新 OneBot 信息。",
+            arguments_model=MemberArguments,
+            executor=get_group_member,
+            timeout_seconds=tool_timeout_seconds,
+        ),
+        ToolDefinition(
+            name="search_group_memory",
+            description="搜索当前群已学习的称呼、人物观察、兴趣和近期关键事实。",
+            arguments_model=MemorySearchArguments,
+            executor=search_memory,
+            timeout_seconds=tool_timeout_seconds,
+        ),
+        ToolDefinition(
+            name="run_cli",
+            description=(
+                "在隔离、无网络、一次性的 Linux 工作区中执行 shell、Python 或常用 CLI。"
+            ),
+            arguments_model=CliArguments,
+            executor=run_cli,
+            timeout_seconds=max(tool_timeout_seconds, 120),
+        ),
+    ):
+        registry.register(definition)
+    return registry
+
+
+def _json_result(success: bool, data: Any = None, error: str = "") -> str:
+    value: Dict[str, Any] = {"success": success}
+    if success:
+        value["data"] = data
+    else:
+        value["error"] = error
+    return json.dumps(value, ensure_ascii=False, default=str)

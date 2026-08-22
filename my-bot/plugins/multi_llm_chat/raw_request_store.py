@@ -4,7 +4,6 @@ from datetime import date, datetime, timedelta
 from pathlib import Path
 from typing import Any, Dict, Optional
 
-
 LOG_FILE_PREFIX = "llm-requests-"
 
 
@@ -13,6 +12,7 @@ def append_raw_request(
     request_id: str,
     request_type: str,
     request_body: Dict[str, Any],
+    metadata: Optional[Dict[str, Any]] = None,
     now: Optional[datetime] = None,
 ) -> Path:
     recorded_at = now or datetime.now().astimezone()
@@ -22,6 +22,7 @@ def append_raw_request(
         "recorded_at": recorded_at.isoformat(),
         "request_id": request_id,
         "request_type": request_type,
+        "metadata": metadata or {},
         "request": request_body,
     }
     encoded_record = (json.dumps(record, ensure_ascii=False) + "\n").encode("utf-8")
