@@ -14,7 +14,7 @@ dependencies = [
     "jmcomic==2.7.4",
     "nonebot2[fastapi]>=2.4,<3",
     "nonebot-adapter-onebot>=2.4,<3",
-    "nonebot-plugin-apscheduler",
+    "nonebot-plugin-apscheduler>=0.5,<1",
     "openai>=1.0,<3",
     "pydantic>=2.7,<3"
 ]
@@ -33,6 +33,6 @@ packages = []
 adapters = [
     { name = "OneBot V11", module_name = "nonebot.adapters.onebot.v11" }
 ]
-plugins = ["nonebot_plugin_status", "nonebot_plugin_fortune", "nonebot_plugin_whateat_pic", "nonebot_plugin_animeres", "nonebot_plugin_fakemsg"]
+plugins = ["nonebot_plugin_status", "nonebot_plugin_whateat_pic", "nonebot_plugin_animeres", "nonebot_plugin_fakemsg"]
 plugin_dirs = ['my-bot/plugins']
 builtin_plugins = ["echo"]
