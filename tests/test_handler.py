@@ -1,10 +1,34 @@
+import asyncio
 import importlib
 from types import SimpleNamespace
 
 import nonebot
 import pytest
 from multi_llm_chat.models import ImageResource
-from nonebot.adapters.onebot.v11 import Message, MessageSegment
+from multi_llm_chat.reply_tracker import OutgoingReplyTracker
+from nonebot.adapters.onebot.v11 import GroupMessageEvent, Message, MessageSegment
+
+
+def make_group_event(message: Message) -> GroupMessageEvent:
+    return GroupMessageEvent(
+        time=1_777_000_000,
+        self_id=2_436_220_150,
+        post_type="message",
+        sub_type="normal",
+        user_id=2_997_592_724,
+        message_type="group",
+        message_id=123,
+        message=message,
+        raw_message=str(message),
+        font=0,
+        sender={
+            "user_id": 2_997_592_724,
+            "nickname": "Peter",
+            "card": "",
+            "role": "member",
+        },
+        group_id=708_695_087,
+    )
 
 
 def test_get_connected_bot_normalizes_onebot_self_id(monkeypatch) -> None:
@@ -74,3 +98,106 @@ async def test_incoming_image_is_downloaded_independently_of_model_setting(
             "onebot:100:1",
         )
     ]
+
+
+def test_at_bot_between_image_and_text_is_an_immediate_message() -> None:
+    nonebot.init()
+    handler = importlib.import_module("multi_llm_chat.handler")
+    event = make_group_event(
+        Message(
+            [
+                MessageSegment(
+                    "image",
+                    {
+                        "file": "image.png",
+                        "url": "https://multimedia.nt.qq.com.cn/image.png",
+                    },
+                ),
+                MessageSegment.at(2_436_220_150),
+                MessageSegment.text(" 看看这张图"),
+            ]
+        )
+    )
+
+    assert event.to_me is False
+    assert handler.is_directed_at_bot(event) is True
+
+
+@pytest.mark.asyncio
+async def test_general_handler_does_not_ingest_message_directed_at_bot(
+    monkeypatch,
+) -> None:
+    nonebot.init()
+    handler = importlib.import_module("multi_llm_chat.handler")
+    event = make_group_event(
+        Message(
+            [
+                MessageSegment(
+                    "image",
+                    {
+                        "file": "image.png",
+                        "url": "https://multimedia.nt.qq.com.cn/image.png",
+                    },
+                ),
+                MessageSegment.at(2_436_220_150),
+            ]
+        )
+    )
+    ingested = False
+
+    async def fake_ingest_event(*args, **kwargs):
+        nonlocal ingested
+        ingested = True
+
+    monkeypatch.setattr(handler, "_ingest_event", fake_ingest_event)
+
+    await handler.handle_message(event, event.message)
+
+    assert ingested is False
+
+
+@pytest.mark.asyncio
+async def test_other_matcher_reply_is_recorded_from_nonebot_context(
+    monkeypatch,
+) -> None:
+    nonebot.init()
+    handler = importlib.import_module("multi_llm_chat.handler")
+    event = make_group_event(Message(MessageSegment.text("今天中午吃什么")))
+    stored_events = []
+
+    class FakeConversationStore:
+        async def append(self, event):
+            stored_events.append(event)
+
+    tracker = OutgoingReplyTracker()
+    monkeypatch.setattr(handler, "conversation_store", FakeConversationStore())
+    monkeypatch.setattr(handler, "reply_tracker", tracker)
+    matcher_token = handler.nonebot_current_matcher.set(
+        SimpleNamespace(plugin_name="nonebot_plugin_whateat_pic")
+    )
+    event_token = handler.nonebot_current_event.set(event)
+    try:
+        task = asyncio.create_task(
+            handler.track_outgoing_group_message(
+                bot=object(),
+                exception=None,
+                api="send_group_msg",
+                data={
+                    "group_id": event.group_id,
+                    "message": "推荐吃面",
+                },
+                result={"message_id": 456},
+            )
+        )
+        await task
+    finally:
+        handler.nonebot_current_event.reset(event_token)
+        handler.nonebot_current_matcher.reset(matcher_token)
+
+    event_id = "onebot:708695087:123"
+    assert tracker.has_external_reply(event_id, "multi_llm_chat")
+    assert len(stored_events) == 1
+    assert stored_events[0].source_event_id == event_id
+    assert stored_events[0].source == "plugin:nonebot_plugin_whateat_pic"
+    assert stored_events[0].role == "assistant"
+    assert stored_events[0].content == "推荐吃面"

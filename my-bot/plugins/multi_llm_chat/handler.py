@@ -1,5 +1,4 @@
 import asyncio
-from contextvars import ContextVar
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple, cast
@@ -9,10 +8,10 @@ from nonebot import get_bot, get_plugin_config, on_message, require
 from nonebot.adapters import Bot as BaseBot
 from nonebot.adapters.onebot.v11 import Bot, GroupMessageEvent, Message
 from nonebot.log import logger
-from nonebot.matcher import Matcher
-from nonebot.message import run_postprocessor, run_preprocessor
+from nonebot.matcher import current_event as nonebot_current_event
+from nonebot.matcher import current_matcher as nonebot_current_matcher
 from nonebot.params import EventMessage
-from nonebot.rule import Rule, to_me
+from nonebot.rule import Rule
 from pydantic import ValidationError
 
 from .cli_runner import DockerCliRunner
@@ -30,10 +29,7 @@ from .raw_request_store import cleanup_raw_request_logs
 from .reply_tracker import (
     MatcherExecution,
     OutgoingReplyTracker,
-    current_matcher_execution,
-    enter_matcher_execution,
     is_plugin_source,
-    leave_matcher_execution,
 )
 from .tools import (
     AgentRunner,
@@ -132,10 +128,6 @@ conversation_maintainer = ConversationMaintainer(
 )
 reply_tracker = OutgoingReplyTracker()
 
-_matcher_token: ContextVar[Optional[Any]] = ContextVar(
-    "multi_llm_chat_matcher_token",
-    default=None,
-)
 _group_locks: Dict[str, asyncio.Lock] = {}
 _passive_tasks: Dict[str, asyncio.Task] = {}
 _roster_sync_tasks: Dict[str, asyncio.Task] = {}
@@ -146,6 +138,16 @@ async def check_whitelist(event: GroupMessageEvent) -> bool:
     return str(event.group_id) in config.llm_chat_whitelist
 
 
+def is_directed_at_bot(event: GroupMessageEvent) -> bool:
+    if bool(getattr(event, "to_me", False)):
+        return True
+    original_message = getattr(event, "original_message", event.message)
+    return any(
+        segment.type == "at" and str(segment.data.get("qq", "")) == str(event.self_id)
+        for segment in original_message
+    )
+
+
 llm_chat = on_message(
     rule=Rule(check_whitelist),
     priority=100,
@@ -153,39 +155,10 @@ llm_chat = on_message(
 )
 
 llm_chat_mention = on_message(
-    rule=Rule(check_whitelist) & to_me(),
+    rule=Rule(check_whitelist) & Rule(is_directed_at_bot),
     priority=120,
     block=False,
 )
-
-
-@run_preprocessor
-async def capture_matcher_execution(event: GroupMessageEvent, matcher: Matcher) -> None:
-    source_plugin = str(
-        getattr(matcher, "plugin_name", "")
-        or getattr(matcher, "module", "")
-        or matcher.__class__.__name__
-    )
-    token = enter_matcher_execution(
-        MatcherExecution(
-            event_id=_event_id(event),
-            group_id=str(event.group_id),
-            source_plugin=source_plugin,
-        )
-    )
-    _matcher_token.set(token)
-
-
-@run_postprocessor
-async def clear_matcher_execution(
-    event: GroupMessageEvent,
-    matcher: Matcher,
-    exception: Optional[Exception],
-) -> None:
-    token = _matcher_token.get()
-    if token is not None:
-        leave_matcher_execution(token)
-        _matcher_token.set(None)
 
 
 @BaseBot.on_called_api
@@ -198,9 +171,22 @@ async def track_outgoing_group_message(
 ) -> None:
     if exception is not None or api not in SEND_GROUP_APIS:
         return
-    execution = current_matcher_execution()
-    if execution is None or is_plugin_source(execution.source_plugin, PLUGIN_NAME):
+    matcher = nonebot_current_matcher.get(None)
+    trigger_event = nonebot_current_event.get(None)
+    if matcher is None or not isinstance(trigger_event, GroupMessageEvent):
         return
+    source_plugin = str(
+        getattr(matcher, "plugin_name", "")
+        or getattr(matcher, "module_name", "")
+        or matcher.__class__.__name__
+    )
+    if is_plugin_source(source_plugin, PLUGIN_NAME):
+        return
+    execution = MatcherExecution(
+        event_id=_event_id(trigger_event),
+        group_id=str(trigger_event.group_id),
+        source_plugin=source_plugin,
+    )
     group_id = str(data.get("group_id", ""))
     if not group_id or group_id != execution.group_id:
         return
@@ -225,9 +211,9 @@ async def handle_message(
     event: GroupMessageEvent,
     message: Message = EventMessage(),
 ) -> None:
-    chat_event = await _ingest_event(event, message)
-    if getattr(event, "to_me", False):
+    if is_directed_at_bot(event):
         return
+    chat_event = await _ingest_event(event, message)
     if reply_tracker.has_external_reply(chat_event.event_id, PLUGIN_NAME):
         return
     _schedule_passive_reply(chat_event, event.self_id)
@@ -271,7 +257,7 @@ async def _ingest_event(event: GroupMessageEvent, message: Message) -> ChatEvent
             content=content,
             images=images,
             sent_at=_event_datetime(event),
-            to_me=bool(getattr(event, "to_me", False)),
+            to_me=is_directed_at_bot(event),
         )
         state = await conversation_store.append(chat_event)
     _ensure_roster_sync(event.self_id, group_id)

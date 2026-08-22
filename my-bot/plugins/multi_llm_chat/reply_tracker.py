@@ -1,7 +1,6 @@
 import time
-from contextvars import ContextVar, Token
 from dataclasses import dataclass
-from typing import Dict, List, Optional
+from typing import Dict, List
 
 
 @dataclass(frozen=True)
@@ -19,24 +18,6 @@ class ReplyRecord:
     api: str
     sent_at_monotonic: float
     message_id: str = ""
-
-
-_current_execution: ContextVar[Optional[MatcherExecution]] = ContextVar(
-    "multi_llm_chat_matcher_execution",
-    default=None,
-)
-
-
-def enter_matcher_execution(execution: MatcherExecution) -> Token:
-    return _current_execution.set(execution)
-
-
-def leave_matcher_execution(token: Token) -> None:
-    _current_execution.reset(token)
-
-
-def current_matcher_execution() -> Optional[MatcherExecution]:
-    return _current_execution.get()
 
 
 def is_plugin_source(source_plugin: str, plugin_name: str) -> bool:
