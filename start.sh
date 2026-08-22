@@ -1,12 +1,14 @@
+#!/usr/bin/env bash
 
-# neBot 服务管理脚本 - 支持 start | stop | restart | status | log
-# 文件名：manage_nonebot.sh
+# NoneBot 服务管理脚本 - 支持 start | stop | restart | status | log
 
 # 配置区 ==============================================
-NB_WORKDIR="/home/PeterAlbus/napcat/nonebot/peteralbus_nonebot"  # NoneBot 项目路径
-# VENV_PATH="/root/anaconda3/envs/nonebot"                  # 虚拟环境路径（若无则留空）
-PID_FILE="$NB_WORKDIR/nb.pid"              # PID 存储文件
-LOG_FILE="$NB_WORKDIR/nb.log"               # 日志文件路径
+NB_WORKDIR="/home/PeterAlbus/napcat/nonebot/peteralbus_nonebot"
+CONDA_ENV_PATH="/root/anaconda3/envs/nonebot"
+CONDA_INIT_SCRIPT="/root/anaconda3/etc/profile.d/conda.sh"
+NB_CLI="/root/.local/bin/nb"
+PID_FILE="$NB_WORKDIR/nb.pid"
+LOG_FILE="$NB_WORKDIR/nb.log"
 # ====================================================
 
 # 创建必要的目录和文件
@@ -14,6 +16,22 @@ init_files() {
     [ ! -d "$(dirname "$PID_FILE")" ] && mkdir -p "$(dirname "$PID_FILE")"
     [ ! -d "$(dirname "$LOG_FILE")" ] && mkdir -p "$(dirname "$LOG_FILE")"
     touch "$LOG_FILE"
+}
+
+# 校验固定运行环境，避免回退到当前 Shell 中的 Python 或其他 Conda 环境
+check_runtime() {
+    if [ ! -f "$CONDA_INIT_SCRIPT" ]; then
+        echo "❌ Conda 初始化脚本不存在: $CONDA_INIT_SCRIPT"
+        exit 1
+    fi
+    if [ ! -x "$CONDA_ENV_PATH/bin/python" ]; then
+        echo "❌ 指定的 Conda 环境不可用: $CONDA_ENV_PATH"
+        exit 1
+    fi
+    if [ ! -x "$NB_CLI" ]; then
+        echo "❌ nb-cli 不存在或不可执行: $NB_CLI"
+        exit 1
+    fi
 }
 
 # 启动服务
@@ -30,16 +48,23 @@ start() {
 
     init_files
     cd "$NB_WORKDIR" || exit 1
-    
-    # 激活虚拟环境（如果配置）
-    VENV_CMD=""
-    if [ -n "$VENV_PATH" ]; then
-        echo "🔧 激活虚拟环境: $VENV_PATH"
-        VENV_CMD="conda activate nonebot && "
-    fi
-    
+
+    check_runtime
+    echo "🔧 固定 Conda 环境: $CONDA_ENV_PATH"
     echo "🚀 正在启动 NoneBot 服务..."
-    nohup bash -c "${VENV_CMD}nb run --reload > \"$LOG_FILE\" 2>&1 & echo \$! > \"$PID_FILE\"" > /dev/null &
+    nohup /bin/bash -c '
+        source "$1"
+        conda activate "$2"
+        if [ "$CONDA_PREFIX" != "$2" ]; then
+            echo "Conda 环境校验失败: expected=$2, actual=$CONDA_PREFIX" >&2
+            exit 1
+        fi
+        cd "$3" || exit 1
+        exec "$4" run --reload
+    ' start-nonebot "$CONDA_INIT_SCRIPT" "$CONDA_ENV_PATH" "$NB_WORKDIR" "$NB_CLI" \
+        > "$LOG_FILE" 2>&1 &
+    NB_PID=$!
+    echo "$NB_PID" > "$PID_FILE"
     sleep 2
     
     # 验证启动
