@@ -3,7 +3,7 @@ import json
 from datetime import datetime, timezone
 
 import pytest
-from multi_llm_chat.context import ContextBuilder, select_recent_event_messages
+from multi_llm_chat.context import ContextBuilder, select_recent_event_count
 from multi_llm_chat.identity import GroupRosterService
 from multi_llm_chat.media import ImageStore
 from multi_llm_chat.memory import GroupMemoryStore
@@ -97,7 +97,12 @@ async def test_onebot_roster_is_identity_source_for_structured_context(tmp_path)
         ],
     )
 
-    messages = await builder.build("100", state)
+    messages = await builder.build(
+        "100",
+        state,
+        turn_mode="passive",
+        trigger_event_id="e2",
+    )
 
     assert roster.group_name == "测试群"
     assert {call[0] for call in bot.calls} == {
@@ -108,15 +113,16 @@ async def test_onebot_roster_is_identity_source_for_structured_context(tmp_path)
         data for api, data in bot.calls if api == "get_group_member_list"
     )
     assert member_list_call == {"group_id": 100}
-    assert any("明哥 [user_id=200]" in item["content"] for item in messages)
-    assert any("人工初始称呼：明先生" in item["content"] for item in messages)
-    assert messages[-4]["role"] == "system"
-    assert "2026-08-22T12:00:00+08:00" in messages[-4]["content"]
-    assert messages[-3]["role"] == "user"
-    assert messages[-3]["name"] == "qq_200"
-    assert messages[-3]["content"] == "今天吃什么"
-    assert messages[-2]["role"] == "system"
-    assert '"source_plugin":"nonebot_plugin_whateat_pic"' in messages[-2]["content"]
+    assert "明哥 [user_id=200]" in messages[1]["content"]
+    assert '"pinned_aliases":["明先生"]' in messages[1]["content"]
+    assert "2026-08-22T12:00:00+08:00" in messages[1]["content"]
+    assert '"source_plugin":"nonebot_plugin_whateat_pic"' in messages[1]["content"]
+    assert '"mode":"passive"' in messages[1]["content"]
+    assert '"messages_since_last_reply":0' in messages[1]["content"]
+    assert [message["role"] for message in messages].count("system") == 2
+    assert messages[-2]["role"] == "user"
+    assert messages[-2]["name"] == "qq_200"
+    assert messages[-2]["content"] == "今天吃什么"
     assert messages[-1]["role"] == "assistant"
     assert messages[-1]["content"] == "推荐吃面"
 
@@ -130,23 +136,14 @@ def test_pinned_aliases_use_user_id_without_group_scope(tmp_path):
     assert service.pinned_aliases("201") == []
 
 
-def test_context_window_keeps_event_metadata_and_body_together():
-    first = [
-        {"role": "system", "content": "first metadata"},
-        {"role": "user", "content": "first body"},
-    ]
-    second = [
-        {"role": "system", "content": "second metadata"},
-        {"role": "assistant", "content": "second body"},
-    ]
-
-    selected = select_recent_event_messages(
-        [first, second],
+def test_context_window_selects_whole_recent_events():
+    selected = select_recent_event_count(
+        [100, 100],
         available_chars=1,
         minimum_count=1,
     )
 
-    assert selected == second
+    assert selected == 1
 
 
 @pytest.mark.asyncio

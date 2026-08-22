@@ -4,7 +4,7 @@ import importlib
 import json
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Awaitable, Callable, Dict, List, Optional, Type
+from typing import Any, Awaitable, Callable, Dict, List, Literal, Optional, Type
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
@@ -33,6 +33,23 @@ class MemorySearchArguments(ToolArguments):
 class CliArguments(ToolArguments):
     command: str = Field(min_length=1, max_length=4000)
     timeout_seconds: Optional[int] = Field(default=None, ge=1, le=120)
+
+
+SkipReplyReason = Literal[
+    "addressed_to_others",
+    "already_answered",
+    "repeated_content",
+    "low_incremental_value",
+    "insufficient_context",
+    "bot_spoke_recently",
+]
+
+
+class FinishWithoutReplyArguments(ToolArguments):
+    reason: SkipReplyReason
+
+
+FINISH_WITHOUT_REPLY_TOOL_NAME = "finish_without_reply"
 
 
 @dataclass(frozen=True)
@@ -188,8 +205,10 @@ def _make_json_schema_strict(value: Any) -> None:
 
 @dataclass(frozen=True)
 class AgentRunResult:
+    action: Literal["reply", "skip"]
     content: str
     tool_steps: int
+    skip_reason: str = ""
 
 
 class AgentRunner:
@@ -212,6 +231,7 @@ class AgentRunner:
         group_id: str,
         triggering_user_id: str,
         bot: Any,
+        turn_mode: Literal["direct", "passive"],
     ) -> AgentRunResult:
         workspace = self._cli_runner.create_workspace(turn_id)
         context = ToolContext(
@@ -222,19 +242,47 @@ class AgentRunner:
             workspace=workspace,
         )
         conversation = list(messages)
+        tools = self._registry.schemas()
+        if turn_mode == "passive":
+            tools.append(finish_without_reply_schema())
         try:
             for step in range(self._max_steps + 1):
                 turn = await self._provider.complete(
                     messages=conversation,
-                    request_type="chat_agent",
+                    request_type=f"{turn_mode}_chat_agent",
                     turn_id=turn_id,
                     step=step,
-                    tools=self._registry.schemas(),
+                    tools=tools,
                     tool_choice="auto",
                     allow_builtin_tools=True,
                 )
                 if not turn.tool_calls:
-                    return AgentRunResult(content=turn.content, tool_steps=step)
+                    if not turn.content:
+                        raise RuntimeError("大模型没有产生回复或沉默动作")
+                    return AgentRunResult(
+                        action="reply",
+                        content=turn.content,
+                        tool_steps=step,
+                    )
+                skip_calls = [
+                    call
+                    for call in turn.tool_calls
+                    if call.function.name == FINISH_WITHOUT_REPLY_TOOL_NAME
+                ]
+                if skip_calls:
+                    if turn_mode != "passive":
+                        raise RuntimeError("直接回复模式不允许保持沉默")
+                    if len(turn.tool_calls) != 1 or turn.content:
+                        raise RuntimeError("沉默动作不能与正文或其他工具同时使用")
+                    arguments = FinishWithoutReplyArguments.model_validate_json(
+                        skip_calls[0].function.arguments
+                    )
+                    return AgentRunResult(
+                        action="skip",
+                        content="",
+                        tool_steps=step,
+                        skip_reason=arguments.reason,
+                    )
                 if step >= self._max_steps:
                     raise RuntimeError("大模型工具调用超过最大轮次")
                 conversation.append(turn.as_message())
@@ -254,6 +302,21 @@ class AgentRunner:
             raise RuntimeError("大模型工具调用没有产生最终回复")
         finally:
             await asyncio.to_thread(self._cli_runner.remove_workspace, workspace)
+
+
+def finish_without_reply_schema() -> Dict[str, Any]:
+    return {
+        "type": "function",
+        "function": {
+            "name": FINISH_WITHOUT_REPLY_TOOL_NAME,
+            "description": (
+                "结束本轮且不向群聊发送任何消息。仅在 passive 模式下，"
+                "当发言不自然或没有明显增量价值时调用。"
+            ),
+            "parameters": strict_model_json_schema(FinishWithoutReplyArguments),
+            "strict": True,
+        },
+    }
 
 
 def build_default_tool_registry(

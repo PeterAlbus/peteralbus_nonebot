@@ -3,7 +3,8 @@ from datetime import datetime, timedelta, timezone
 import pytest
 from multi_llm_chat.conversation import (
     ConversationStore,
-    format_event_for_model,
+    event_message_for_model,
+    event_metadata_for_model,
     summary_to_text,
 )
 from multi_llm_chat.models import ChatEvent, ConversationSummary
@@ -67,23 +68,25 @@ async def test_compression_preserves_events_that_arrived_after_covered_range(tmp
 
 
 def test_model_messages_keep_real_roles_time_and_optional_id():
-    user_metadata, user_message = format_event_for_model(
-        event("user", 3),
+    user_event = event("user", 3)
+    assistant_event = event("bot", 4, role="assistant")
+    user_metadata = event_metadata_for_model(
+        user_event,
         display_name="小明",
         append_user_id=True,
     )
-    assistant_metadata, assistant_message = format_event_for_model(
-        event("bot", 4, role="assistant")
-    )
+    user_message = event_message_for_model(user_event)
+    assistant_metadata = event_metadata_for_model(assistant_event)
+    assistant_message = event_message_for_model(assistant_event)
 
-    assert user_metadata["role"] == "system"
-    assert "2026-08-22T20:03:00+08:00" in user_metadata["content"]
-    assert "小明 [user_id=200]" in user_metadata["content"]
+    assert user_metadata["role"] == "user"
+    assert user_metadata["sent_at"] == "2026-08-22T20:03:00+08:00"
+    assert user_metadata["sender"] == "小明 [user_id=200]"
     assert user_message["role"] == "user"
     assert user_message["name"] == "qq_200"
     assert user_message["content"] == "消息 user"
-    assert assistant_metadata["role"] == "system"
-    assert "source" not in assistant_metadata["content"]
+    assert assistant_metadata["role"] == "assistant"
+    assert assistant_metadata["source"] == "llm"
+    assert assistant_metadata["source_event_id"] is None
     assert assistant_message["role"] == "assistant"
     assert assistant_message["content"] == "消息 bot"
-    assert "source=" not in assistant_message["content"]

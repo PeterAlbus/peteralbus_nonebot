@@ -67,6 +67,8 @@ class ChatEvent(StrictModel):
     images: List[ImageResource] = Field(default_factory=list)
     sent_at: datetime
     to_me: bool = False
+    mentioned_user_ids: List[str] = Field(default_factory=list)
+    reply_to_message_id: Optional[str] = None
 
 
 class ConversationSummary(StrictModel):
@@ -83,11 +85,6 @@ class ConversationSummaryContent(StrictModel):
     decisions: List[str] = Field(default_factory=list)
     unresolved_questions: List[str] = Field(default_factory=list)
     temporary_context: List[str] = Field(default_factory=list)
-
-
-class ReplyDecision(StrictModel):
-    should_reply: bool
-    reason: str = ""
 
 
 class ConversationState(StrictModel):

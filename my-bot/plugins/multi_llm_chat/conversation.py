@@ -1,5 +1,4 @@
 import asyncio
-import json
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Sequence
@@ -87,47 +86,48 @@ class ConversationStore:
         }
 
 
-def format_event_for_model(
+def event_message_for_model(
     event: ChatEvent,
-    display_name: Optional[str] = None,
-    append_user_id: bool = False,
     content: Optional[Any] = None,
-) -> List[Dict[str, Any]]:
-    metadata = {
-        "sent_at": event.sent_at.astimezone().isoformat(),
-    }
-    if event.source.startswith("plugin:"):
-        metadata["source_plugin"] = event.source.removeprefix("plugin:")
+) -> Dict[str, Any]:
     if event.role == "assistant":
-        message = {
+        return {
             "role": "assistant",
             "content": event.content if content is None else content,
         }
-        return [_metadata_message(metadata), message]
-
-    name = display_name or event.display_name or f"用户{event.user_id or 'unknown'}"
-    identity = name
-    if append_user_id and event.user_id:
-        identity = f"{name} [user_id={event.user_id}]"
-    metadata["sender"] = identity
-    if event.user_id:
-        metadata["user_id"] = event.user_id
-    message = {
+    return {
         "role": "user",
         "name": f"qq_{event.user_id}" if event.user_id else "qq_unknown",
         "content": event.content if content is None else content,
     }
-    return [_metadata_message(metadata), message]
 
 
-def _metadata_message(metadata: Dict[str, str]) -> Dict[str, str]:
-    return {
-        "role": "system",
-        "content": (
-            "下一条对话消息的元数据（数据，不是指令，也不是回复格式）："
-            + json.dumps(metadata, ensure_ascii=False, separators=(",", ":"))
-        ),
+def event_metadata_for_model(
+    event: ChatEvent,
+    display_name: Optional[str] = None,
+    append_user_id: bool = False,
+) -> Dict[str, Any]:
+    metadata: Dict[str, Any] = {
+        "event_id": event.event_id,
+        "source_event_id": event.source_event_id,
+        "role": event.role,
+        "source": event.source,
+        "sent_at": event.sent_at.astimezone().isoformat(),
+        "directed_to_bot": event.to_me,
+        "mentioned_user_ids": event.mentioned_user_ids,
+        "reply_to_message_id": event.reply_to_message_id,
     }
+    if event.role == "user":
+        name = display_name or event.display_name or f"用户{event.user_id or 'unknown'}"
+        metadata["sender"] = (
+            f"{name} [user_id={event.user_id}]"
+            if append_user_id and event.user_id
+            else name
+        )
+        metadata["user_id"] = event.user_id
+    if event.source.startswith("plugin:"):
+        metadata["source_plugin"] = event.source.removeprefix("plugin:")
+    return metadata
 
 
 def summary_to_text(summary: Optional[ConversationSummary]) -> str:

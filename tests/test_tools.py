@@ -3,6 +3,7 @@ from pathlib import Path
 import pytest
 from multi_llm_chat.models import AssistantTurn, FunctionCall, MemoryPatch, ToolCall
 from multi_llm_chat.tools import (
+    FINISH_WITHOUT_REPLY_TOOL_NAME,
     AgentRunner,
     ToolArguments,
     ToolDefinition,
@@ -76,8 +77,10 @@ async def test_agent_executes_registered_tool_and_returns_final_answer(tmp_path)
         group_id="100",
         triggering_user_id="200",
         bot=object(),
+        turn_mode="direct",
     )
 
+    assert result.action == "reply"
     assert result.content == "结果是 42"
     assert result.tool_steps == 1
     second_messages = provider.calls[1]["messages"]
@@ -85,6 +88,64 @@ async def test_agent_executes_registered_tool_and_returns_final_answer(tmp_path)
     assert second_messages[-1]["role"] == "tool"
     assert '"value": 42' in second_messages[-1]["content"]
     assert cli.removed == [tmp_path / "turn-1"]
+    direct_tool_names = [
+        tool["function"]["name"]
+        for tool in provider.calls[0]["tools"]
+        if tool["type"] == "function"
+    ]
+    assert FINISH_WITHOUT_REPLY_TOOL_NAME not in direct_tool_names
+    assert provider.calls[0]["request_type"] == "direct_chat_agent"
+
+
+class SkipProvider:
+    def __init__(self):
+        self.calls = []
+
+    async def complete(self, **kwargs):
+        self.calls.append(kwargs)
+        return AssistantTurn(
+            tool_calls=[
+                ToolCall(
+                    id="skip-1",
+                    function=FunctionCall(
+                        name=FINISH_WITHOUT_REPLY_TOOL_NAME,
+                        arguments='{"reason":"already_answered"}',
+                    ),
+                )
+            ]
+        )
+
+
+@pytest.mark.asyncio
+async def test_passive_agent_can_finish_without_reply_in_one_request(tmp_path):
+    provider = SkipProvider()
+    runner = AgentRunner(
+        provider,
+        ToolRegistry(output_max_chars=2000),
+        FakeCliRunner(tmp_path),
+        max_steps=2,
+    )
+
+    result = await runner.run(
+        messages=[{"role": "user", "content": "哈哈"}],
+        turn_id="turn-skip",
+        group_id="100",
+        triggering_user_id="200",
+        bot=object(),
+        turn_mode="passive",
+    )
+
+    assert result.action == "skip"
+    assert result.content == ""
+    assert result.skip_reason == "already_answered"
+    assert len(provider.calls) == 1
+    assert provider.calls[0]["request_type"] == "passive_chat_agent"
+    tool_names = [
+        tool["function"]["name"]
+        for tool in provider.calls[0]["tools"]
+        if tool["type"] == "function"
+    ]
+    assert FINISH_WITHOUT_REPLY_TOOL_NAME in tool_names
 
 
 @pytest.mark.asyncio

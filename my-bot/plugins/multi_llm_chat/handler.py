@@ -12,7 +12,6 @@ from nonebot.matcher import current_event as nonebot_current_event
 from nonebot.matcher import current_matcher as nonebot_current_matcher
 from nonebot.params import EventMessage
 from nonebot.rule import Rule
-from pydantic import ValidationError
 
 from .cli_runner import DockerCliRunner
 from .config import Config
@@ -22,8 +21,7 @@ from .identity import GroupRosterService
 from .maintenance import ConversationMaintainer
 from .media import ImageDownloadError, ImageStore
 from .memory import GroupMemoryStore
-from .models import ChatEvent, ConversationState, ImageResource, ReplyDecision
-from .prompts import PASSIVE_DECISION_SYSTEM_PROMPT
+from .models import ChatEvent, ConversationState, ImageResource
 from .provider import LLMProvider
 from .raw_request_store import cleanup_raw_request_logs
 from .reply_tracker import (
@@ -129,6 +127,7 @@ conversation_maintainer = ConversationMaintainer(
 reply_tracker = OutgoingReplyTracker()
 
 _group_locks: Dict[str, asyncio.Lock] = {}
+_reply_locks: Dict[str, asyncio.Lock] = {}
 _passive_tasks: Dict[str, asyncio.Task] = {}
 _roster_sync_tasks: Dict[str, asyncio.Task] = {}
 _maintenance_tasks: Dict[str, asyncio.Task] = {}
@@ -194,6 +193,7 @@ async def track_outgoing_group_message(
     if isinstance(result, dict):
         message_id = str(result.get("message_id", "") or "")
     reply_tracker.record(execution, api=api, message_id=message_id)
+    _cancel_passive_task(group_id)
     event = ChatEvent(
         event_id=f"outgoing:{group_id}:{message_id or uuid4().hex}",
         source_event_id=execution.event_id,
@@ -213,6 +213,7 @@ async def handle_message(
 ) -> None:
     if is_directed_at_bot(event):
         return
+    _cancel_passive_task(str(event.group_id))
     chat_event = await _ingest_event(event, message)
     if reply_tracker.has_external_reply(chat_event.event_id, PLUGIN_NAME):
         return
@@ -225,8 +226,8 @@ async def handle_mention_immediate(
     event: GroupMessageEvent,
     message: Message = EventMessage(),
 ) -> None:
+    _cancel_passive_task(str(event.group_id))
     chat_event = await _ingest_event(event, message)
-    _cancel_passive_task(chat_event.group_id)
     if config.llm_chat_reply_grace_seconds > 0:
         await asyncio.sleep(config.llm_chat_reply_grace_seconds)
     await _process_reply(
@@ -258,6 +259,8 @@ async def _ingest_event(event: GroupMessageEvent, message: Message) -> ChatEvent
             images=images,
             sent_at=_event_datetime(event),
             to_me=is_directed_at_bot(event),
+            mentioned_user_ids=_mentioned_user_ids(event),
+            reply_to_message_id=_reply_to_message_id(event),
         )
         state = await conversation_store.append(chat_event)
     _ensure_roster_sync(event.self_id, group_id)
@@ -298,91 +301,72 @@ async def _process_reply(
     trigger_event: ChatEvent,
     passive: bool,
 ) -> None:
-    async with _group_lock(trigger_event.group_id):
-        if reply_tracker.has_external_reply(trigger_event.event_id, PLUGIN_NAME):
-            return
-        state = await conversation_store.get(trigger_event.group_id)
-        try:
-            state = await conversation_maintainer.maintain_if_needed(
-                trigger_event.group_id,
-                state,
-            )
-        except Exception as error:
-            logger.error(
-                "对话压缩维护失败: group_id={}, error_type={}",
-                trigger_event.group_id,
-                type(error).__name__,
-            )
+    async with _reply_lock(trigger_event.group_id):
+        await _run_reply(bot, trigger_event, passive)
 
-        if passive:
-            decision_messages = await context_builder.build(
-                trigger_event.group_id,
-                state,
-                extra_system_prompt=PASSIVE_DECISION_SYSTEM_PROMPT,
-                include_images=provider.image_understanding_enabled(),
-            )
-            decision_turn = await provider.complete(
-                messages=decision_messages,
-                request_type="reply_decision",
-                turn_id=uuid4().hex,
-                step=0,
-                response_format={"type": "json_object"},
-            )
-            try:
-                decision = ReplyDecision.model_validate_json(decision_turn.content)
-            except ValidationError as error:
-                logger.warning(
-                    "回复判断结果校验失败: group_id={}, error_count={}",
-                    trigger_event.group_id,
-                    error.error_count(),
-                )
-                return
-            if not decision.should_reply:
-                return
 
-        if reply_tracker.has_external_reply(trigger_event.event_id, PLUGIN_NAME):
-            return
-        state = await conversation_store.get(trigger_event.group_id)
-        agent_messages = await context_builder.build(
+async def _run_reply(
+    bot: Bot,
+    trigger_event: ChatEvent,
+    passive: bool,
+) -> None:
+    if passive and not _passive_reply_is_current(trigger_event.group_id):
+        return
+    if reply_tracker.has_external_reply(trigger_event.event_id, PLUGIN_NAME):
+        return
+    state = await conversation_store.get(trigger_event.group_id)
+    turn_mode = "passive" if passive else "direct"
+    agent_messages = await context_builder.build(
+        trigger_event.group_id,
+        state,
+        turn_mode=turn_mode,
+        trigger_event_id=trigger_event.event_id,
+        include_images=provider.image_understanding_enabled(),
+    )
+    result = await agent_runner.run(
+        messages=agent_messages,
+        turn_id=uuid4().hex,
+        group_id=trigger_event.group_id,
+        triggering_user_id=trigger_event.user_id or "",
+        bot=bot,
+        turn_mode=turn_mode,
+    )
+    if result.action == "skip":
+        logger.debug(
+            "大模型决定不参与群聊: group_id={}, event_id={}, reason={}",
             trigger_event.group_id,
-            state,
-            include_images=provider.image_understanding_enabled(),
+            trigger_event.event_id,
+            result.skip_reason,
         )
-        result = await agent_runner.run(
-            messages=agent_messages,
-            turn_id=uuid4().hex,
+        return
+    if passive and not _passive_reply_is_current(trigger_event.group_id):
+        return
+    if reply_tracker.has_external_reply(trigger_event.event_id, PLUGIN_NAME):
+        logger.info(
+            "其他插件已回复，取消大模型发送: group_id={}, event_id={}",
+            trigger_event.group_id,
+            trigger_event.event_id,
+        )
+        return
+    send_result = await bot.call_api(
+        "send_group_msg",
+        group_id=int(trigger_event.group_id),
+        message=result.content,
+    )
+    message_id = ""
+    if isinstance(send_result, dict):
+        message_id = str(send_result.get("message_id", "") or "")
+    await conversation_store.append(
+        ChatEvent(
+            event_id=f"llm:{trigger_event.group_id}:{message_id or uuid4().hex}",
+            source_event_id=trigger_event.event_id,
             group_id=trigger_event.group_id,
-            triggering_user_id=trigger_event.user_id or "",
-            bot=bot,
+            role="assistant",
+            source="llm",
+            content=result.content,
+            sent_at=datetime.now().astimezone(),
         )
-        if not result.content:
-            return
-        if reply_tracker.has_external_reply(trigger_event.event_id, PLUGIN_NAME):
-            logger.info(
-                "其他插件已回复，取消大模型发送: group_id={}, event_id={}",
-                trigger_event.group_id,
-                trigger_event.event_id,
-            )
-            return
-        send_result = await bot.call_api(
-            "send_group_msg",
-            group_id=int(trigger_event.group_id),
-            message=result.content,
-        )
-        message_id = ""
-        if isinstance(send_result, dict):
-            message_id = str(send_result.get("message_id", "") or "")
-        await conversation_store.append(
-            ChatEvent(
-                event_id=f"llm:{trigger_event.group_id}:{message_id or uuid4().hex}",
-                source_event_id=trigger_event.event_id,
-                group_id=trigger_event.group_id,
-                role="assistant",
-                source="llm",
-                content=result.content,
-                sent_at=datetime.now().astimezone(),
-            )
-        )
+    )
 
 
 def _ensure_roster_sync(self_id: str, group_id: str) -> None:
@@ -424,12 +408,11 @@ def _ensure_conversation_maintenance(
 
     async def maintain() -> None:
         try:
-            async with _group_lock(group_id):
-                latest_state = await conversation_store.get(group_id)
-                await conversation_maintainer.maintain_if_needed(
-                    group_id,
-                    latest_state,
-                )
+            latest_state = await conversation_store.get(group_id)
+            await conversation_maintainer.maintain_if_needed(
+                group_id,
+                latest_state,
+            )
         except Exception as error:
             logger.error(
                 "后台对话压缩失败: group_id={}, error_type={}",
@@ -447,8 +430,17 @@ def _cancel_passive_task(group_id: str) -> None:
         task.cancel()
 
 
+def _passive_reply_is_current(group_id: str) -> bool:
+    current_task = asyncio.current_task()
+    return current_task is not None and _passive_tasks.get(group_id) is current_task
+
+
 def _group_lock(group_id: str) -> asyncio.Lock:
     return _group_locks.setdefault(group_id, asyncio.Lock())
+
+
+def _reply_lock(group_id: str) -> asyncio.Lock:
+    return _reply_locks.setdefault(group_id, asyncio.Lock())
 
 
 def _get_connected_bot(self_id: Any) -> Bot:
@@ -467,6 +459,32 @@ def _event_datetime(event: GroupMessageEvent) -> datetime:
     if timestamp > 0:
         return datetime.fromtimestamp(timestamp).astimezone()
     return datetime.now().astimezone()
+
+
+def _mentioned_user_ids(event: GroupMessageEvent) -> List[str]:
+    original_message = getattr(event, "original_message", event.message)
+    return sorted(
+        {
+            str(segment.data.get("qq", ""))
+            for segment in original_message
+            if segment.type == "at"
+            and str(segment.data.get("qq", ""))
+            and str(segment.data.get("qq", "")) != "all"
+            and str(segment.data.get("qq", "")) != str(event.self_id)
+        }
+    )
+
+
+def _reply_to_message_id(event: GroupMessageEvent) -> Optional[str]:
+    original_message = getattr(event, "original_message", event.message)
+    return next(
+        (
+            str(segment.data.get("id", ""))
+            for segment in original_message
+            if segment.type == "reply" and str(segment.data.get("id", ""))
+        ),
+        None,
+    )
 
 
 def render_message_content(message: Message) -> str:

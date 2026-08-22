@@ -32,6 +32,7 @@ class ImageDownloadError(RuntimeError):
 class ImageStore:
     def __init__(self, state_dir: Path) -> None:
         self._directory = state_dir / "media"
+        self._access_lock = asyncio.Lock()
 
     async def download(
         self,
@@ -89,7 +90,8 @@ class ImageStore:
         )
 
     async def data_urls(self, images: Sequence[ImageResource]) -> List[str]:
-        return [await asyncio.to_thread(self._data_url, image) for image in images]
+        async with self._access_lock:
+            return [await asyncio.to_thread(self._data_url, image) for image in images]
 
     async def build_content(
         self,
@@ -141,17 +143,18 @@ class ImageStore:
             if image.media_key not in retained_keys
         }
         deleted = 0
-        for media_key in removable_keys:
-            path = self._resolve_media_key(media_key)
-            try:
-                await asyncio.to_thread(path.unlink)
-            except FileNotFoundError:
-                continue
-            deleted += 1
-            try:
-                await asyncio.to_thread(path.parent.rmdir)
-            except OSError:
-                pass
+        async with self._access_lock:
+            for media_key in removable_keys:
+                path = self._resolve_media_key(media_key)
+                try:
+                    await asyncio.to_thread(path.unlink)
+                except FileNotFoundError:
+                    continue
+                deleted += 1
+                try:
+                    await asyncio.to_thread(path.parent.rmdir)
+                except OSError:
+                    pass
         return deleted
 
     def _data_url(self, image: ImageResource) -> str:
