@@ -78,6 +78,7 @@ async def test_agent_executes_registered_tool_and_returns_final_answer(tmp_path)
         triggering_user_id="200",
         bot=object(),
         turn_mode="direct",
+        allow_finish_without_reply=False,
     )
 
     assert result.action == "reply"
@@ -133,6 +134,7 @@ async def test_passive_agent_can_finish_without_reply_in_one_request(tmp_path):
         triggering_user_id="200",
         bot=object(),
         turn_mode="passive",
+        allow_finish_without_reply=True,
     )
 
     assert result.action == "skip"
@@ -146,6 +148,66 @@ async def test_passive_agent_can_finish_without_reply_in_one_request(tmp_path):
         if tool["type"] == "function"
     ]
     assert FINISH_WITHOUT_REPLY_TOOL_NAME in tool_names
+
+
+@pytest.mark.asyncio
+async def test_direct_agent_can_finish_when_trigger_was_already_answered(tmp_path):
+    provider = SkipProvider()
+    runner = AgentRunner(
+        provider,
+        ToolRegistry(output_max_chars=2000),
+        FakeCliRunner(tmp_path),
+        max_steps=2,
+    )
+
+    result = await runner.run(
+        messages=[
+            {"role": "user", "content": "他怎么笑得那么开心"},
+            {"role": "user", "content": ""},
+            {"role": "assistant", "content": "因为他刚打完仗。"},
+        ],
+        turn_id="turn-direct-already-answered",
+        group_id="100",
+        triggering_user_id="200",
+        bot=object(),
+        turn_mode="direct",
+        allow_finish_without_reply=True,
+    )
+
+    assert result.action == "skip"
+    assert result.content == ""
+    assert result.skip_reason == "already_answered"
+    assert len(provider.calls) == 1
+    assert provider.calls[0]["request_type"] == "direct_chat_agent"
+
+
+@pytest.mark.asyncio
+async def test_direct_agent_rejects_finish_when_no_llm_reply_was_inserted(tmp_path):
+    provider = SkipProvider()
+    runner = AgentRunner(
+        provider,
+        ToolRegistry(output_max_chars=2000),
+        FakeCliRunner(tmp_path),
+        max_steps=2,
+    )
+
+    with pytest.raises(RuntimeError, match="当前轮次不允许无回复终止"):
+        await runner.run(
+            messages=[{"role": "user", "content": "回答我的问题"}],
+            turn_id="turn-direct-must-reply",
+            group_id="100",
+            triggering_user_id="200",
+            bot=object(),
+            turn_mode="direct",
+            allow_finish_without_reply=False,
+        )
+
+    tool_names = [
+        tool["function"]["name"]
+        for tool in provider.calls[0]["tools"]
+        if tool["type"] == "function"
+    ]
+    assert FINISH_WITHOUT_REPLY_TOOL_NAME not in tool_names
 
 
 @pytest.mark.asyncio

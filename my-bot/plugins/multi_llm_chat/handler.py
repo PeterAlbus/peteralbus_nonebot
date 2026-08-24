@@ -316,11 +316,16 @@ async def _run_reply(
         return
     state = await conversation_store.get(trigger_event.group_id)
     turn_mode = "passive" if passive else "direct"
+    allow_finish_without_reply = passive or _has_llm_reply_after_trigger(
+        state,
+        trigger_event,
+    )
     agent_messages = await context_builder.build(
         trigger_event.group_id,
         state,
         turn_mode=turn_mode,
-        trigger_event_id=trigger_event.event_id,
+        trigger_event=trigger_event,
+        allow_finish_without_reply=allow_finish_without_reply,
         include_images=provider.image_understanding_enabled(),
     )
     result = await agent_runner.run(
@@ -330,6 +335,7 @@ async def _run_reply(
         triggering_user_id=trigger_event.user_id or "",
         bot=bot,
         turn_mode=turn_mode,
+        allow_finish_without_reply=allow_finish_without_reply,
     )
     if result.action == "skip":
         logger.debug(
@@ -366,6 +372,31 @@ async def _run_reply(
             content=result.content,
             sent_at=datetime.now().astimezone(),
         )
+    )
+
+
+def _has_llm_reply_after_trigger(
+    state: ConversationState,
+    trigger_event: ChatEvent,
+) -> bool:
+    trigger_index = next(
+        (
+            index
+            for index, event in enumerate(state.recent_events)
+            if event.event_id == trigger_event.event_id
+        ),
+        None,
+    )
+    if trigger_index is not None:
+        later_events = state.recent_events[trigger_index + 1 :]
+    else:
+        later_events = [
+            event
+            for event in state.recent_events
+            if event.sent_at > trigger_event.sent_at
+        ]
+    return any(
+        event.role == "assistant" and event.source == "llm" for event in later_events
     )
 
 

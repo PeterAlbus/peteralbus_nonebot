@@ -300,9 +300,11 @@ async def test_passive_reply_builds_context_and_runs_agent_once(monkeypatch) -> 
 
     assert len(context_calls) == 1
     assert context_calls[0][1]["turn_mode"] == "passive"
-    assert context_calls[0][1]["trigger_event_id"] == trigger.event_id
+    assert context_calls[0][1]["trigger_event"] is trigger
+    assert context_calls[0][1]["allow_finish_without_reply"] is True
     assert len(agent_calls) == 1
     assert agent_calls[0]["turn_mode"] == "passive"
+    assert agent_calls[0]["allow_finish_without_reply"] is True
     assert bot.calls == [
         (
             "send_group_msg",
@@ -312,3 +314,62 @@ async def test_passive_reply_builds_context_and_runs_agent_once(monkeypatch) -> 
     assert len(stored_events) == 1
     assert stored_events[0].source_event_id == trigger.event_id
     assert stored_events[0].content == "吃面吧"
+
+
+def test_direct_finish_requires_llm_reply_after_trigger() -> None:
+    nonebot.init()
+    handler = importlib.import_module("multi_llm_chat.handler")
+    trigger = ChatEvent(
+        event_id="trigger",
+        group_id="708695087",
+        role="user",
+        source="onebot",
+        user_id="2997592724",
+        content="",
+        sent_at=datetime(2026, 8, 24, 3, 54, 44, tzinfo=timezone.utc),
+        to_me=True,
+    )
+    user_message = ChatEvent(
+        event_id="later-user",
+        group_id=trigger.group_id,
+        role="user",
+        source="onebot",
+        user_id="10001",
+        content="插入的群友消息",
+        sent_at=datetime(2026, 8, 24, 3, 54, 45, tzinfo=timezone.utc),
+    )
+    plugin_reply = ChatEvent(
+        event_id="plugin-reply",
+        group_id=trigger.group_id,
+        role="assistant",
+        source="plugin:nonebot_plugin_whateat_pic",
+        content="插件回复",
+        sent_at=datetime(2026, 8, 24, 3, 54, 46, tzinfo=timezone.utc),
+    )
+    llm_reply = ChatEvent(
+        event_id="llm-reply",
+        group_id=trigger.group_id,
+        role="assistant",
+        source="llm",
+        content="小P排队期间插入的回复",
+        sent_at=datetime(2026, 8, 24, 3, 54, 47, tzinfo=timezone.utc),
+    )
+
+    assert not handler._has_llm_reply_after_trigger(
+        ConversationState(group_id=trigger.group_id, recent_events=[trigger]),
+        trigger,
+    )
+    assert not handler._has_llm_reply_after_trigger(
+        ConversationState(
+            group_id=trigger.group_id,
+            recent_events=[trigger, user_message, plugin_reply],
+        ),
+        trigger,
+    )
+    assert handler._has_llm_reply_after_trigger(
+        ConversationState(
+            group_id=trigger.group_id,
+            recent_events=[trigger, user_message, plugin_reply, llm_reply],
+        ),
+        trigger,
+    )

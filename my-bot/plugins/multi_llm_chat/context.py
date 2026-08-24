@@ -12,6 +12,8 @@ from .media import ImageStore
 from .memory import GroupMemoryStore
 from .models import ChatEvent, ConversationState
 from .prompts import (
+    DIRECT_TURN_FINISH_SYSTEM_PROMPT,
+    DIRECT_TURN_REPLY_REQUIRED_SYSTEM_PROMPT,
     DIRECT_TURN_SYSTEM_PROMPT,
     PASSIVE_TURN_SYSTEM_PROMPT,
     PERSONA_SYSTEM_PROMPT,
@@ -42,12 +44,15 @@ class ContextBuilder:
         group_id: str,
         state: ConversationState,
         turn_mode: TurnMode,
-        trigger_event_id: str,
+        trigger_event: ChatEvent,
+        allow_finish_without_reply: bool,
         include_images: bool = False,
     ) -> List[Dict[str, Any]]:
         relevant_user_ids = {
             event.user_id for event in state.recent_events if event.user_id is not None
         }
+        if trigger_event.user_id is not None:
+            relevant_user_ids.add(trigger_event.user_id)
         relevant_user_ids.update(
             user_id
             for event in state.recent_events
@@ -78,12 +83,25 @@ class ContextBuilder:
             relevant_user_ids,
             pinned_aliases,
         )
-        policy_prompt = PERSONA_SYSTEM_PROMPT + "\n\n" + _turn_prompt(turn_mode)
+        trigger_metadata = event_metadata_for_model(
+            trigger_event,
+            display_name=display_names.get(trigger_event.user_id or ""),
+            append_user_id=identity_config.append_user_id,
+        )
+        trigger_metadata["content"] = trigger_event.content
+        policy_prompt = (
+            PERSONA_SYSTEM_PROMPT
+            + "\n\n"
+            + _turn_prompt(
+                turn_mode,
+                allow_finish_without_reply,
+            )
+        )
         runtime_context: Dict[str, Any] = {
             "current_time": datetime.now().astimezone().isoformat(),
             "turn": {
                 "mode": turn_mode,
-                "trigger_event_id": trigger_event_id,
+                "trigger": trigger_metadata,
             },
             "bot_activity": _bot_activity(state.recent_events),
             "participants": participants,
@@ -204,12 +222,15 @@ def serialized_message_chars(messages: Sequence[Dict[str, Any]]) -> int:
     return len(json.dumps(list(messages), ensure_ascii=False, separators=(",", ":")))
 
 
-def _turn_prompt(turn_mode: TurnMode) -> str:
-    return (
-        DIRECT_TURN_SYSTEM_PROMPT
-        if turn_mode == "direct"
-        else PASSIVE_TURN_SYSTEM_PROMPT
-    )
+def _turn_prompt(
+    turn_mode: TurnMode,
+    allow_finish_without_reply: bool,
+) -> str:
+    if turn_mode == "passive":
+        return PASSIVE_TURN_SYSTEM_PROMPT
+    if allow_finish_without_reply:
+        return DIRECT_TURN_SYSTEM_PROMPT + "\n\n" + DIRECT_TURN_FINISH_SYSTEM_PROMPT
+    return DIRECT_TURN_SYSTEM_PROMPT + "\n\n" + DIRECT_TURN_REPLY_REQUIRED_SYSTEM_PROMPT
 
 
 def _runtime_context_text(runtime_context: Dict[str, Any]) -> str:

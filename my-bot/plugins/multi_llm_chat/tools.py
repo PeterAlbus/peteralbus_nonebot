@@ -232,6 +232,7 @@ class AgentRunner:
         triggering_user_id: str,
         bot: Any,
         turn_mode: Literal["direct", "passive"],
+        allow_finish_without_reply: bool,
     ) -> AgentRunResult:
         workspace = self._cli_runner.create_workspace(turn_id)
         context = ToolContext(
@@ -243,7 +244,7 @@ class AgentRunner:
         )
         conversation = list(messages)
         tools = self._registry.schemas()
-        if turn_mode == "passive":
+        if allow_finish_without_reply:
             tools.append(finish_without_reply_schema())
         try:
             for step in range(self._max_steps + 1):
@@ -270,8 +271,8 @@ class AgentRunner:
                     if call.function.name == FINISH_WITHOUT_REPLY_TOOL_NAME
                 ]
                 if skip_calls:
-                    if turn_mode != "passive":
-                        raise RuntimeError("直接回复模式不允许保持沉默")
+                    if not allow_finish_without_reply:
+                        raise RuntimeError("当前轮次不允许无回复终止")
                     if len(turn.tool_calls) != 1 or turn.content:
                         raise RuntimeError("沉默动作不能与正文或其他工具同时使用")
                     arguments = FinishWithoutReplyArguments.model_validate_json(
@@ -310,8 +311,8 @@ def finish_without_reply_schema() -> Dict[str, Any]:
         "function": {
             "name": FINISH_WITHOUT_REPLY_TOOL_NAME,
             "description": (
-                "结束本轮且不向群聊发送任何消息。仅在 passive 模式下，"
-                "当发言不自然或没有明显增量价值时调用。"
+                "结束本轮且不向群聊发送任何消息。仅在本轮系统提示明确允许终止，"
+                "并且无需继续回复时调用。"
             ),
             "parameters": strict_model_json_schema(FinishWithoutReplyArguments),
             "strict": True,

@@ -101,7 +101,8 @@ async def test_onebot_roster_is_identity_source_for_structured_context(tmp_path)
         "100",
         state,
         turn_mode="passive",
-        trigger_event_id="e2",
+        trigger_event=state.recent_events[0],
+        allow_finish_without_reply=True,
     )
 
     assert roster.group_name == "测试群"
@@ -118,6 +119,8 @@ async def test_onebot_roster_is_identity_source_for_structured_context(tmp_path)
     assert "2026-08-22T12:00:00+08:00" in messages[1]["content"]
     assert '"source_plugin":"nonebot_plugin_whateat_pic"' in messages[1]["content"]
     assert '"mode":"passive"' in messages[1]["content"]
+    assert '"trigger":{"event_id":"e1"' in messages[1]["content"]
+    assert '"content":"今天吃什么"' in messages[1]["content"]
     assert '"messages_since_last_reply":0' in messages[1]["content"]
     assert [message["role"] for message in messages].count("system") == 2
     assert messages[-2]["role"] == "user"
@@ -125,6 +128,85 @@ async def test_onebot_roster_is_identity_source_for_structured_context(tmp_path)
     assert messages[-2]["content"] == "今天吃什么"
     assert messages[-1]["role"] == "assistant"
     assert messages[-1]["content"] == "推荐吃面"
+
+
+@pytest.mark.asyncio
+async def test_direct_context_keeps_empty_trigger_distinct_from_queued_messages(
+    tmp_path,
+):
+    identity_path = tmp_path / "identity.json"
+    write_identity_config(identity_path)
+    roster_service = GroupRosterService(tmp_path, identity_path)
+    builder = ContextBuilder(
+        roster_service,
+        GroupMemoryStore(tmp_path, max_facts=10, max_aliases_per_member=8),
+        ImageStore(tmp_path),
+        char_budget=8000,
+        recent_event_min_count=2,
+        max_events=10,
+    )
+    question = ChatEvent(
+        event_id="question",
+        group_id="100",
+        role="user",
+        source="onebot",
+        user_id="200",
+        display_name="小明",
+        content="他怎么笑得那么开心",
+        sent_at=datetime(2026, 8, 24, 3, 54, 32, tzinfo=timezone.utc),
+    )
+    empty_mention = ChatEvent(
+        event_id="mention",
+        group_id="100",
+        role="user",
+        source="onebot",
+        user_id="200",
+        display_name="小明",
+        content="",
+        sent_at=datetime(2026, 8, 24, 3, 54, 44, tzinfo=timezone.utc),
+        to_me=True,
+    )
+    queued_reply = ChatEvent(
+        event_id="reply",
+        source_event_id="question",
+        group_id="100",
+        role="assistant",
+        source="llm",
+        content="因为他刚打完仗。",
+        sent_at=datetime(2026, 8, 24, 3, 54, 53, tzinfo=timezone.utc),
+    )
+    state = ConversationState(
+        group_id="100",
+        recent_events=[question, empty_mention, queued_reply],
+    )
+
+    messages = await builder.build(
+        "100",
+        state,
+        turn_mode="direct",
+        trigger_event=empty_mention,
+        allow_finish_without_reply=True,
+    )
+
+    runtime = messages[1]["content"]
+    assert '"mode":"direct"' in runtime
+    assert '"trigger":{"event_id":"mention"' in runtime
+    assert '"sender":"用户200 [user_id=200]"' in runtime
+    assert '"content":""' in runtime
+    assert messages[-1]["role"] == "assistant"
+    assert "turn.trigger" in messages[0]["content"]
+    assert "触发前最近的连续消息" in messages[0]["content"]
+    assert "finish_without_reply" in messages[0]["content"]
+
+    messages_without_finish = await builder.build(
+        "100",
+        state,
+        turn_mode="direct",
+        trigger_event=empty_mention,
+        allow_finish_without_reply=False,
+    )
+    assert "finish_without_reply" not in messages_without_finish[0]["content"]
+    assert "本轮必须回应触发用户的实际意图" in messages_without_finish[0]["content"]
 
 
 def test_pinned_aliases_use_user_id_without_group_scope(tmp_path):
