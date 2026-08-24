@@ -4,6 +4,8 @@ import pytest
 from multi_llm_chat.models import AssistantTurn, FunctionCall, MemoryPatch, ToolCall
 from multi_llm_chat.tools import (
     FINISH_WITHOUT_REPLY_TOOL_NAME,
+    MENTION_MEMBERS_TOOL_NAME,
+    REPLY_TO_EVENT_TOOL_NAME,
     AgentRunner,
     ToolArguments,
     ToolDefinition,
@@ -79,6 +81,8 @@ async def test_agent_executes_registered_tool_and_returns_final_answer(tmp_path)
         bot=object(),
         turn_mode="direct",
         allow_finish_without_reply=False,
+        replyable_event_ids=[],
+        mentionable_user_ids=[],
     )
 
     assert result.action == "reply"
@@ -95,6 +99,8 @@ async def test_agent_executes_registered_tool_and_returns_final_answer(tmp_path)
         if tool["type"] == "function"
     ]
     assert FINISH_WITHOUT_REPLY_TOOL_NAME not in direct_tool_names
+    assert REPLY_TO_EVENT_TOOL_NAME not in direct_tool_names
+    assert MENTION_MEMBERS_TOOL_NAME not in direct_tool_names
     assert provider.calls[0]["request_type"] == "direct_chat_agent"
 
 
@@ -135,6 +141,8 @@ async def test_passive_agent_can_finish_without_reply_in_one_request(tmp_path):
         bot=object(),
         turn_mode="passive",
         allow_finish_without_reply=True,
+        replyable_event_ids=[],
+        mentionable_user_ids=[],
     )
 
     assert result.action == "skip"
@@ -172,6 +180,8 @@ async def test_direct_agent_can_finish_when_trigger_was_already_answered(tmp_pat
         bot=object(),
         turn_mode="direct",
         allow_finish_without_reply=True,
+        replyable_event_ids=[],
+        mentionable_user_ids=[],
     )
 
     assert result.action == "skip"
@@ -200,6 +210,8 @@ async def test_direct_agent_rejects_finish_when_no_llm_reply_was_inserted(tmp_pa
             bot=object(),
             turn_mode="direct",
             allow_finish_without_reply=False,
+            replyable_event_ids=[],
+            mentionable_user_ids=[],
         )
 
     tool_names = [
@@ -208,6 +220,132 @@ async def test_direct_agent_rejects_finish_when_no_llm_reply_was_inserted(tmp_pa
         if tool["type"] == "function"
     ]
     assert FINISH_WITHOUT_REPLY_TOOL_NAME not in tool_names
+
+
+class AddressingProvider:
+    def __init__(self):
+        self.calls = []
+
+    async def complete(self, **kwargs):
+        self.calls.append(kwargs)
+        if len(self.calls) == 1:
+            return AssistantTurn(
+                tool_calls=[
+                    ToolCall(
+                        id="reply-1",
+                        function=FunctionCall(
+                            name=REPLY_TO_EVENT_TOOL_NAME,
+                            arguments='{"event_id":"event-1"}',
+                        ),
+                    ),
+                    ToolCall(
+                        id="mention-1",
+                        function=FunctionCall(
+                            name=MENTION_MEMBERS_TOOL_NAME,
+                            arguments='{"user_ids":["200","201","200"]}',
+                        ),
+                    ),
+                ]
+            )
+        return AssistantTurn(content="我说的是这条消息。")
+
+
+@pytest.mark.asyncio
+async def test_addressing_tools_build_draft_before_plain_text_reply(tmp_path):
+    provider = AddressingProvider()
+    runner = AgentRunner(
+        provider,
+        ToolRegistry(output_max_chars=2000),
+        FakeCliRunner(tmp_path),
+        max_steps=2,
+    )
+
+    result = await runner.run(
+        messages=[{"role": "user", "content": "你在说谁？"}],
+        turn_id="turn-addressing",
+        group_id="100",
+        triggering_user_id="200",
+        bot=object(),
+        turn_mode="direct",
+        allow_finish_without_reply=False,
+        replyable_event_ids=["event-1"],
+        mentionable_user_ids=["200", "201"],
+    )
+
+    assert result.action == "reply"
+    assert result.content == "我说的是这条消息。"
+    assert result.reply_to_event_id == "event-1"
+    assert result.mention_user_ids == ("200", "201")
+    tool_names = {
+        tool["function"]["name"]
+        for tool in provider.calls[0]["tools"]
+        if tool["type"] == "function"
+    }
+    assert REPLY_TO_EVENT_TOOL_NAME in tool_names
+    assert MENTION_MEMBERS_TOOL_NAME in tool_names
+    second_messages = provider.calls[1]["messages"]
+    assert second_messages[-3]["role"] == "assistant"
+    assert second_messages[-2]["role"] == "tool"
+    assert '"reply_to_event_id": "event-1"' in second_messages[-2]["content"]
+    assert second_messages[-1]["role"] == "tool"
+    assert '"mention_user_ids": ["200", "201"]' in second_messages[-1]["content"]
+
+
+class InvalidAddressingProvider:
+    def __init__(self):
+        self.calls = []
+
+    async def complete(self, **kwargs):
+        self.calls.append(kwargs)
+        if len(self.calls) == 1:
+            return AssistantTurn(
+                tool_calls=[
+                    ToolCall(
+                        id="reply-invalid",
+                        function=FunctionCall(
+                            name=REPLY_TO_EVENT_TOOL_NAME,
+                            arguments='{"event_id":"other-group-event"}',
+                        ),
+                    ),
+                    ToolCall(
+                        id="mention-invalid",
+                        function=FunctionCall(
+                            name=MENTION_MEMBERS_TOOL_NAME,
+                            arguments='{"user_ids":["999"]}',
+                        ),
+                    ),
+                ]
+            )
+        return AssistantTurn(content="不带定向格式的回复")
+
+
+@pytest.mark.asyncio
+async def test_addressing_tools_reject_targets_outside_current_scope(tmp_path):
+    provider = InvalidAddressingProvider()
+    runner = AgentRunner(
+        provider,
+        ToolRegistry(output_max_chars=2000),
+        FakeCliRunner(tmp_path),
+        max_steps=2,
+    )
+
+    result = await runner.run(
+        messages=[{"role": "user", "content": "测试非法目标"}],
+        turn_id="turn-invalid-addressing",
+        group_id="100",
+        triggering_user_id="200",
+        bot=object(),
+        turn_mode="direct",
+        allow_finish_without_reply=False,
+        replyable_event_ids=["event-1"],
+        mentionable_user_ids=["200"],
+    )
+
+    assert result.reply_to_event_id is None
+    assert result.mention_user_ids == ()
+    second_messages = provider.calls[1]["messages"]
+    assert "引用目标不属于当前可回复事件" in second_messages[-2]["content"]
+    assert "@目标不是当前群成员: 999" in second_messages[-1]["content"]
 
 
 @pytest.mark.asyncio

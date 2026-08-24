@@ -114,8 +114,10 @@ def event_metadata_for_model(
         "source": event.source,
         "sent_at": event.sent_at.astimezone().isoformat(),
         "directed_to_bot": event.to_me,
+        "reply_available": event.platform_message_id is not None,
         "mentioned_user_ids": event.mentioned_user_ids,
         "reply_to_message_id": event.reply_to_message_id,
+        "reply_to_event_id": event.reply_to_event_id,
     }
     if event.role == "user":
         name = display_name or event.display_name or f"用户{event.user_id or 'unknown'}"

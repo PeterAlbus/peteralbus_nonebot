@@ -57,6 +57,7 @@ class ImageResource(StrictModel):
 
 class ChatEvent(StrictModel):
     event_id: str
+    platform_message_id: Optional[str] = None
     source_event_id: Optional[str] = None
     group_id: str
     role: Literal["user", "assistant"]
@@ -69,6 +70,7 @@ class ChatEvent(StrictModel):
     to_me: bool = False
     mentioned_user_ids: List[str] = Field(default_factory=list)
     reply_to_message_id: Optional[str] = None
+    reply_to_event_id: Optional[str] = None
 
 
 class ConversationSummary(StrictModel):

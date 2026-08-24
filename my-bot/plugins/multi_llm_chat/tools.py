@@ -2,9 +2,20 @@ import asyncio
 import copy
 import importlib
 import json
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Awaitable, Callable, Dict, List, Literal, Optional, Type
+from typing import (
+    Any,
+    Awaitable,
+    Callable,
+    Dict,
+    List,
+    Literal,
+    Optional,
+    Sequence,
+    Tuple,
+    Type,
+)
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
@@ -49,7 +60,17 @@ class FinishWithoutReplyArguments(ToolArguments):
     reason: SkipReplyReason
 
 
+class ReplyToEventArguments(ToolArguments):
+    event_id: str = Field(min_length=1, max_length=200)
+
+
+class MentionMembersArguments(ToolArguments):
+    user_ids: List[str] = Field(min_length=1, max_length=8)
+
+
 FINISH_WITHOUT_REPLY_TOOL_NAME = "finish_without_reply"
+REPLY_TO_EVENT_TOOL_NAME = "reply_to_event"
+MENTION_MEMBERS_TOOL_NAME = "mention_members"
 
 
 @dataclass(frozen=True)
@@ -209,6 +230,14 @@ class AgentRunResult:
     content: str
     tool_steps: int
     skip_reason: str = ""
+    reply_to_event_id: Optional[str] = None
+    mention_user_ids: Tuple[str, ...] = ()
+
+
+@dataclass
+class ReplyDraft:
+    reply_to_event_id: Optional[str] = None
+    mention_user_ids: List[str] = field(default_factory=list)
 
 
 class AgentRunner:
@@ -233,6 +262,8 @@ class AgentRunner:
         bot: Any,
         turn_mode: Literal["direct", "passive"],
         allow_finish_without_reply: bool,
+        replyable_event_ids: Sequence[str],
+        mentionable_user_ids: Sequence[str],
     ) -> AgentRunResult:
         workspace = self._cli_runner.create_workspace(turn_id)
         context = ToolContext(
@@ -243,7 +274,14 @@ class AgentRunner:
             workspace=workspace,
         )
         conversation = list(messages)
+        replyable_events = set(replyable_event_ids)
+        mentionable_users = set(mentionable_user_ids)
+        draft = ReplyDraft()
         tools = self._registry.schemas()
+        if replyable_events:
+            tools.append(reply_to_event_schema())
+        if mentionable_users:
+            tools.append(mention_members_schema())
         if allow_finish_without_reply:
             tools.append(finish_without_reply_schema())
         try:
@@ -264,6 +302,8 @@ class AgentRunner:
                         action="reply",
                         content=turn.content,
                         tool_steps=step,
+                        reply_to_event_id=draft.reply_to_event_id,
+                        mention_user_ids=tuple(draft.mention_user_ids),
                     )
                 skip_calls = [
                     call
@@ -288,11 +328,24 @@ class AgentRunner:
                     raise RuntimeError("大模型工具调用超过最大轮次")
                 conversation.append(turn.as_message())
                 for tool_call in turn.tool_calls:
-                    result = await self._registry.execute(
-                        tool_call.function.name,
-                        tool_call.function.arguments,
-                        context,
-                    )
+                    if tool_call.function.name == REPLY_TO_EVENT_TOOL_NAME:
+                        result = apply_reply_to_event(
+                            draft,
+                            tool_call.function.arguments,
+                            replyable_events,
+                        )
+                    elif tool_call.function.name == MENTION_MEMBERS_TOOL_NAME:
+                        result = apply_mentions(
+                            draft,
+                            tool_call.function.arguments,
+                            mentionable_users,
+                        )
+                    else:
+                        result = await self._registry.execute(
+                            tool_call.function.name,
+                            tool_call.function.arguments,
+                            context,
+                        )
                     conversation.append(
                         {
                             "role": "tool",
@@ -303,6 +356,75 @@ class AgentRunner:
             raise RuntimeError("大模型工具调用没有产生最终回复")
         finally:
             await asyncio.to_thread(self._cli_runner.remove_workspace, workspace)
+
+
+def apply_reply_to_event(
+    draft: ReplyDraft,
+    raw_arguments: str,
+    replyable_event_ids: set[str],
+) -> str:
+    try:
+        arguments = ReplyToEventArguments.model_validate_json(raw_arguments)
+    except ValidationError as error:
+        return _json_result(False, error=f"工具参数校验失败: {error}")
+    if arguments.event_id not in replyable_event_ids:
+        return _json_result(False, error="引用目标不属于当前可回复事件")
+    draft.reply_to_event_id = arguments.event_id
+    return _json_result(True, data={"reply_to_event_id": arguments.event_id})
+
+
+def apply_mentions(
+    draft: ReplyDraft,
+    raw_arguments: str,
+    mentionable_user_ids: set[str],
+) -> str:
+    try:
+        arguments = MentionMembersArguments.model_validate_json(raw_arguments)
+    except ValidationError as error:
+        return _json_result(False, error=f"工具参数校验失败: {error}")
+    requested_user_ids = list(dict.fromkeys(arguments.user_ids))
+    invalid_user_ids = [
+        user_id for user_id in requested_user_ids if user_id not in mentionable_user_ids
+    ]
+    if invalid_user_ids:
+        return _json_result(
+            False,
+            error="@目标不是当前群成员: " + ",".join(invalid_user_ids),
+        )
+    for user_id in requested_user_ids:
+        if user_id not in draft.mention_user_ids:
+            draft.mention_user_ids.append(user_id)
+    return _json_result(True, data={"mention_user_ids": draft.mention_user_ids})
+
+
+def reply_to_event_schema() -> Dict[str, Any]:
+    return {
+        "type": "function",
+        "function": {
+            "name": REPLY_TO_EVENT_TOOL_NAME,
+            "description": (
+                "设置最终群聊消息要引用的近期事件。参数使用运行时上下文中的 event_id；"
+                "再次调用会覆盖之前的引用目标。此工具不会发送消息，调用后继续输出正文。"
+            ),
+            "parameters": strict_model_json_schema(ReplyToEventArguments),
+            "strict": True,
+        },
+    }
+
+
+def mention_members_schema() -> Dict[str, Any]:
+    return {
+        "type": "function",
+        "function": {
+            "name": MENTION_MEMBERS_TOOL_NAME,
+            "description": (
+                "把当前群成员加入最终消息的@目标，可一次指定多人并可多次调用。"
+                "参数只使用已经确认的user_id。此工具不会发送消息，调用后继续输出正文。"
+            ),
+            "parameters": strict_model_json_schema(MentionMembersArguments),
+            "strict": True,
+        },
+    }
 
 
 def finish_without_reply_schema() -> Dict[str, Any]:

@@ -6,7 +6,7 @@ from uuid import uuid4
 
 from nonebot import get_bot, get_plugin_config, on_message, require
 from nonebot.adapters import Bot as BaseBot
-from nonebot.adapters.onebot.v11 import Bot, GroupMessageEvent, Message
+from nonebot.adapters.onebot.v11 import Bot, GroupMessageEvent, Message, MessageSegment
 from nonebot.log import logger
 from nonebot.matcher import current_event as nonebot_current_event
 from nonebot.matcher import current_matcher as nonebot_current_matcher
@@ -196,6 +196,7 @@ async def track_outgoing_group_message(
     _cancel_passive_task(group_id)
     event = ChatEvent(
         event_id=f"outgoing:{group_id}:{message_id or uuid4().hex}",
+        platform_message_id=message_id or None,
         source_event_id=execution.event_id,
         group_id=group_id,
         role="assistant",
@@ -243,6 +244,18 @@ async def _ingest_event(event: GroupMessageEvent, message: Message) -> ChatEvent
     event_id = _event_id(event)
     async with _group_lock(group_id):
         content, images = await ingest_message_content(message, event_id)
+        reply_to_message_id = _reply_to_message_id(event)
+        reply_to_event_id = None
+        if reply_to_message_id is not None:
+            current_state = await conversation_store.get(group_id)
+            reply_to_event_id = next(
+                (
+                    item.event_id
+                    for item in current_state.recent_events
+                    if item.platform_message_id == reply_to_message_id
+                ),
+                None,
+            )
         member = await roster_service.update_from_sender(
             group_id=group_id,
             user_id=user_id,
@@ -250,6 +263,7 @@ async def _ingest_event(event: GroupMessageEvent, message: Message) -> ChatEvent
         )
         chat_event = ChatEvent(
             event_id=event_id,
+            platform_message_id=str(event.message_id),
             group_id=group_id,
             role="user",
             source="onebot",
@@ -260,7 +274,8 @@ async def _ingest_event(event: GroupMessageEvent, message: Message) -> ChatEvent
             sent_at=_event_datetime(event),
             to_me=is_directed_at_bot(event),
             mentioned_user_ids=_mentioned_user_ids(event),
-            reply_to_message_id=_reply_to_message_id(event),
+            reply_to_message_id=reply_to_message_id,
+            reply_to_event_id=reply_to_event_id,
         )
         state = await conversation_store.append(chat_event)
     _ensure_roster_sync(event.self_id, group_id)
@@ -316,6 +331,12 @@ async def _run_reply(
         return
     state = await conversation_store.get(trigger_event.group_id)
     turn_mode = "passive" if passive else "direct"
+    reply_targets = _reply_targets(state)
+    roster = await roster_service.get_roster(trigger_event.group_id)
+    bot_user_id = str(getattr(bot, "self_id", "") or "")
+    mentionable_user_ids = sorted(
+        user_id for user_id in roster.members if user_id != bot_user_id
+    )
     allow_finish_without_reply = passive or _has_llm_reply_after_trigger(
         state,
         trigger_event,
@@ -336,6 +357,8 @@ async def _run_reply(
         bot=bot,
         turn_mode=turn_mode,
         allow_finish_without_reply=allow_finish_without_reply,
+        replyable_event_ids=sorted(reply_targets),
+        mentionable_user_ids=mentionable_user_ids,
     )
     if result.action == "skip":
         logger.debug(
@@ -354,10 +377,17 @@ async def _run_reply(
             trigger_event.event_id,
         )
         return
+    outgoing_message = _build_outgoing_message(
+        content=result.content,
+        reply_to_event_id=result.reply_to_event_id,
+        mention_user_ids=result.mention_user_ids,
+        reply_targets=reply_targets,
+        mentionable_user_ids=set(mentionable_user_ids),
+    )
     send_result = await bot.call_api(
         "send_group_msg",
         group_id=int(trigger_event.group_id),
-        message=result.content,
+        message=outgoing_message,
     )
     message_id = ""
     if isinstance(send_result, dict):
@@ -365,14 +395,60 @@ async def _run_reply(
     await conversation_store.append(
         ChatEvent(
             event_id=f"llm:{trigger_event.group_id}:{message_id or uuid4().hex}",
+            platform_message_id=message_id or None,
             source_event_id=trigger_event.event_id,
             group_id=trigger_event.group_id,
             role="assistant",
             source="llm",
             content=result.content,
             sent_at=datetime.now().astimezone(),
+            mentioned_user_ids=list(result.mention_user_ids),
+            reply_to_message_id=(
+                reply_targets.get(result.reply_to_event_id)
+                if result.reply_to_event_id
+                else None
+            ),
+            reply_to_event_id=result.reply_to_event_id,
         )
     )
+
+
+def _reply_targets(state: ConversationState) -> Dict[str, str]:
+    targets: Dict[str, str] = {}
+    for event in state.recent_events:
+        message_id = str(event.platform_message_id or "").strip()
+        if not message_id:
+            continue
+        try:
+            normalized_message_id = str(int(message_id))
+        except ValueError:
+            continue
+        targets[event.event_id] = normalized_message_id
+    return targets
+
+
+def _build_outgoing_message(
+    content: str,
+    reply_to_event_id: Optional[str],
+    mention_user_ids: Tuple[str, ...],
+    reply_targets: Dict[str, str],
+    mentionable_user_ids: set[str],
+) -> Any:
+    if reply_to_event_id is None and not mention_user_ids:
+        return content
+    segments: List[MessageSegment] = []
+    if reply_to_event_id is not None:
+        reply_message_id = reply_targets.get(reply_to_event_id)
+        if reply_message_id is None:
+            raise RuntimeError("引用目标不属于当前可回复事件")
+        segments.append(MessageSegment.reply(int(reply_message_id)))
+    for user_id in mention_user_ids:
+        if user_id not in mentionable_user_ids:
+            raise RuntimeError("@目标不是当前群成员")
+        segments.append(MessageSegment.at(user_id))
+        segments.append(MessageSegment.text(" "))
+    segments.append(MessageSegment.text(content))
+    return Message(segments)
 
 
 def _has_llm_reply_after_trigger(

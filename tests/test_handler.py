@@ -228,7 +228,66 @@ async def test_other_matcher_reply_is_recorded_from_nonebot_context(
     assert stored_events[0].source == "plugin:nonebot_plugin_whateat_pic"
     assert stored_events[0].role == "assistant"
     assert stored_events[0].content == "推荐吃面"
+    assert stored_events[0].platform_message_id == "456"
     assert pending_passive_task.cancelled()
+
+
+@pytest.mark.asyncio
+async def test_incoming_event_stores_onebot_message_id(monkeypatch) -> None:
+    nonebot.init()
+    handler = importlib.import_module("multi_llm_chat.handler")
+    incoming = make_group_event(
+        Message(
+            [
+                MessageSegment.reply(321),
+                MessageSegment.text("你好"),
+            ]
+        )
+    )
+    reply_target = ChatEvent(
+        event_id="onebot:708695087:321",
+        platform_message_id="321",
+        group_id="708695087",
+        role="user",
+        source="onebot",
+        user_id="10001",
+        content="被引用的消息",
+        sent_at=datetime(2026, 8, 22, 11, 59, tzinfo=timezone.utc),
+    )
+    stored_events = []
+
+    class FakeConversationStore:
+        async def get(self, group_id):
+            return ConversationState(
+                group_id=group_id,
+                recent_events=[reply_target],
+            )
+
+        async def append(self, event):
+            stored_events.append(event)
+            return ConversationState(
+                group_id=event.group_id,
+                recent_events=[reply_target, event],
+            )
+
+    class FakeRosterService:
+        async def update_from_sender(self, **kwargs):
+            return SimpleNamespace(card="", nickname="Peter")
+
+        def render_member_name(self, member, user_id):
+            return member.nickname
+
+    monkeypatch.setattr(handler, "conversation_store", FakeConversationStore())
+    monkeypatch.setattr(handler, "roster_service", FakeRosterService())
+    monkeypatch.setattr(handler, "_ensure_roster_sync", lambda *args: None)
+    monkeypatch.setattr(handler, "_ensure_conversation_maintenance", lambda *args: None)
+
+    chat_event = await handler._ingest_event(incoming, incoming.message)
+
+    assert chat_event.platform_message_id == "123"
+    assert chat_event.reply_to_message_id == "321"
+    assert chat_event.reply_to_event_id == reply_target.event_id
+    assert stored_events == [chat_event]
 
 
 @pytest.mark.asyncio
@@ -237,6 +296,7 @@ async def test_passive_reply_builds_context_and_runs_agent_once(monkeypatch) -> 
     handler = importlib.import_module("multi_llm_chat.handler")
     trigger = ChatEvent(
         event_id="onebot:708695087:123",
+        platform_message_id="123",
         group_id="708695087",
         role="user",
         source="onebot",
@@ -270,15 +330,29 @@ async def test_passive_reply_builds_context_and_runs_agent_once(monkeypatch) -> 
                 action="reply",
                 content="吃面吧",
                 tool_steps=0,
+                reply_to_event_id=trigger.event_id,
+                mention_user_ids=("10001",),
             )
 
     class FakeProvider:
         def image_understanding_enabled(self):
             return False
 
+    class FakeRosterService:
+        async def get_roster(self, group_id):
+            assert group_id == trigger.group_id
+            return SimpleNamespace(
+                members={
+                    "2997592724": object(),
+                    "10001": object(),
+                    "2436220150": object(),
+                }
+            )
+
     class FakeBot:
         def __init__(self):
             self.calls = []
+            self.self_id = "2436220150"
 
         async def call_api(self, api, **data):
             self.calls.append((api, data))
@@ -289,6 +363,7 @@ async def test_passive_reply_builds_context_and_runs_agent_once(monkeypatch) -> 
     monkeypatch.setattr(handler, "context_builder", FakeContextBuilder())
     monkeypatch.setattr(handler, "agent_runner", FakeAgentRunner())
     monkeypatch.setattr(handler, "provider", FakeProvider())
+    monkeypatch.setattr(handler, "roster_service", FakeRosterService())
     monkeypatch.setattr(handler, "reply_tracker", OutgoingReplyTracker())
     monkeypatch.setattr(
         handler,
@@ -305,15 +380,29 @@ async def test_passive_reply_builds_context_and_runs_agent_once(monkeypatch) -> 
     assert len(agent_calls) == 1
     assert agent_calls[0]["turn_mode"] == "passive"
     assert agent_calls[0]["allow_finish_without_reply"] is True
+    assert agent_calls[0]["replyable_event_ids"] == [trigger.event_id]
+    assert agent_calls[0]["mentionable_user_ids"] == ["10001", "2997592724"]
+    expected_message = Message(
+        [
+            MessageSegment.reply(123),
+            MessageSegment.at("10001"),
+            MessageSegment.text(" "),
+            MessageSegment.text("吃面吧"),
+        ]
+    )
     assert bot.calls == [
         (
             "send_group_msg",
-            {"group_id": 708695087, "message": "吃面吧"},
+            {"group_id": 708695087, "message": expected_message},
         )
     ]
     assert len(stored_events) == 1
     assert stored_events[0].source_event_id == trigger.event_id
     assert stored_events[0].content == "吃面吧"
+    assert stored_events[0].platform_message_id == "456"
+    assert stored_events[0].reply_to_event_id == trigger.event_id
+    assert stored_events[0].reply_to_message_id == "123"
+    assert stored_events[0].mentioned_user_ids == ["10001"]
 
 
 def test_direct_finish_requires_llm_reply_after_trigger() -> None:
