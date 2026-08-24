@@ -152,6 +152,16 @@ docker build -t peteralbus-nonebot-tool-runner:latest tool_runner
 
 普通日志只记录 request ID、turn ID、请求类型、模型、耗时、消息数、响应长度和工具调用数，不记录完整提示词或完整记忆内容。
 
+## 每日群聊日报
+
+`multi_llm_chat` 每天按 `Asia/Shanghai` 时区在 10:00 生成一次群聊日报，只发送给 `my-bot/plugins/multi_llm_chat/daily_digest_config.json` 中显式启用的群。当前配置的目标群为 `748245950`。
+
+日报直接读取公开来源自身提供的 JSON API、RSS/Atom 或新闻列表页，包括 Open-Meteo、AniList、各游戏官网、PC Gamer、Gematsu、新华网、中国政府网、上海市政府，以及 OpenAI、Google AI、Google DeepMind、Hugging Face 和 Anthropic。单个来源请求或解析失败不会阻止已经获取的内容进入日报，失败来源会列在消息底部。
+
+代码先按固定时间窗口、类别和关键词过滤并去重，再通过一次不带任何工具的模型请求完成候选选择、翻译和摘要。模型只能返回代码提供的候选 `item_id`，发送层根据 `item_id` 拼接真实来源链接。AI 资讯最多一条；日报正文最多七条，并受配置中的字符上限约束。
+
+日报发送成功后以 `source="llm:daily_digest"` 写入群聊历史，和普通模型回复明确区分。
+
 ## 测试
 
 ```bash
@@ -159,4 +169,4 @@ pip install -e ".[dev]"
 python -m pytest -q
 ```
 
-测试覆盖 JSON 原子状态、结构化运行时上下文、压缩并发保留、动态多称呼、记忆过期与上限、OneBot 身份同步、单次被动参与决策、跨插件回复判定、结构化引用与 `@` 回复、严格工具参数、工具循环、CLI 命令约束以及 raw request 日志清理。
+测试覆盖 JSON 原子状态、结构化运行时上下文、压缩并发保留、动态多称呼、记忆过期与上限、OneBot 身份同步、单次被动参与决策、跨插件回复判定、结构化引用与 `@` 回复、严格工具参数、工具循环、CLI 命令约束、日报来源解析与发送约束，以及 raw request 日志清理。

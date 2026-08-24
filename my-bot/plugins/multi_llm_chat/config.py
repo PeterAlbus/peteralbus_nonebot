@@ -17,6 +17,7 @@ class Config(BaseModel):
     llm_chat_routes_file: str = "model_routes.json"
     llm_chat_state_dir: str = "state"
     llm_chat_identity_config_file: str = "identity_config.json"
+    llm_chat_daily_digest_config_file: str = "daily_digest_config.json"
     llm_chat_raw_request_log_dir: str = "llm_request_logs"
     llm_chat_raw_request_retention_days: int = 7
 

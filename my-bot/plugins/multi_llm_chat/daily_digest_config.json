@@ -1,0 +1,28 @@
+{
+  "version": 1,
+  "timezone": "Asia/Shanghai",
+  "send_time": {
+    "hour": 10,
+    "minute": 0
+  },
+  "groups": [
+    {
+      "group_id": "748245950",
+      "city": "上海",
+      "latitude": 31.2304,
+      "longitude": 121.4737,
+      "enabled": true
+    }
+  ],
+  "limits": {
+    "max_items": 7,
+    "max_game_items": 3,
+    "max_anime_items": 1,
+    "max_single_player_items": 1,
+    "max_ai_items": 1,
+    "max_news_items": 1,
+    "max_policy_items": 1,
+    "target_chars": 1400,
+    "hard_max_chars": 1800
+  }
+}

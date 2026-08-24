@@ -17,6 +17,7 @@ from .cli_runner import DockerCliRunner
 from .config import Config
 from .context import ContextBuilder
 from .conversation import ConversationStore
+from .daily_digest import DailyDigestService, load_daily_digest_config
 from .identity import GroupRosterService
 from .maintenance import ConversationMaintainer
 from .media import ImageDownloadError, ImageStore
@@ -57,6 +58,10 @@ identity_config_path = _resolve_plugin_path(
     config.llm_chat_identity_config_file,
     "identity_config.json",
 )
+daily_digest_config_path = _resolve_plugin_path(
+    config.llm_chat_daily_digest_config_file,
+    "daily_digest_config.json",
+)
 routes_path = _resolve_plugin_path(config.llm_chat_routes_file, "model_routes.json")
 raw_request_log_dir = _resolve_plugin_path(
     config.llm_chat_raw_request_log_dir,
@@ -84,6 +89,12 @@ provider = LLMProvider(
     config=config,
     routes_path=routes_path,
     raw_request_log_dir=raw_request_log_dir,
+    logger=logger,
+)
+daily_digest_config = load_daily_digest_config(daily_digest_config_path)
+daily_digest_service = DailyDigestService(
+    provider=provider,
+    config=daily_digest_config,
     logger=logger,
 )
 context_builder = ContextBuilder(
@@ -710,3 +721,61 @@ async def clean_expired_raw_request_logs() -> None:
         return
     if deleted_count:
         logger.info("已清理过期大模型原始请求日志: file_count={}", deleted_count)
+
+
+@scheduler.scheduled_job(
+    "cron",
+    hour=daily_digest_config.send_time.hour,
+    minute=daily_digest_config.send_time.minute,
+    timezone=daily_digest_config.timezone,
+    max_instances=1,
+)
+async def send_daily_digests() -> None:
+    try:
+        bot = cast(Bot, get_bot())
+    except ValueError:
+        logger.error("日报发送失败: 当前没有已连接的 OneBot 实例")
+        return
+    for group in daily_digest_config.groups:
+        if not group.enabled:
+            continue
+        _cancel_passive_task(group.group_id)
+        try:
+            async with _reply_lock(group.group_id):
+                message = await daily_digest_service.build_message(group)
+                send_result = await bot.call_api(
+                    "send_group_msg",
+                    group_id=int(group.group_id),
+                    message=message,
+                )
+                message_id = ""
+                if isinstance(send_result, dict):
+                    message_id = str(send_result.get("message_id", "") or "")
+                sent_at = datetime.now().astimezone()
+                state = await conversation_store.append(
+                    ChatEvent(
+                        event_id=(
+                            f"llm:daily_digest:{group.group_id}:"
+                            f"{message_id or uuid4().hex}"
+                        ),
+                        platform_message_id=message_id or None,
+                        group_id=group.group_id,
+                        role="assistant",
+                        source="llm:daily_digest",
+                        content=message,
+                        sent_at=sent_at,
+                    )
+                )
+                _ensure_conversation_maintenance(group.group_id, state)
+                logger.info(
+                    "日报发送成功: group_id={}, message_id={}, chars={}",
+                    group.group_id,
+                    message_id,
+                    len(message),
+                )
+        except Exception as error:
+            logger.opt(exception=error).error(
+                "日报生成或发送失败: group_id={}, error_type={}",
+                group.group_id,
+                type(error).__name__,
+            )

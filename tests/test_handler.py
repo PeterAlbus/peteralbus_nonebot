@@ -405,6 +405,82 @@ async def test_passive_reply_builds_context_and_runs_agent_once(monkeypatch) -> 
     assert stored_events[0].mentioned_user_ids == ["10001"]
 
 
+@pytest.mark.asyncio
+async def test_daily_digest_is_sent_only_to_configured_group_and_recorded(
+    monkeypatch,
+) -> None:
+    nonebot.init()
+    handler = importlib.import_module("multi_llm_chat.handler")
+    stored_events = []
+    cancelled_groups = []
+    maintained = []
+
+    class FakeBot:
+        def __init__(self):
+            self.calls = []
+
+        async def call_api(self, api, **data):
+            self.calls.append((api, data))
+            return {"message_id": 987}
+
+    class FakeDigestService:
+        async def build_message(self, group):
+            assert group.group_id == "748245950"
+            return "上海早报 · 08月25日"
+
+    class FakeConversationStore:
+        async def append(self, event):
+            stored_events.append(event)
+            return ConversationState(group_id=event.group_id, recent_events=[event])
+
+    bot = FakeBot()
+    monkeypatch.setattr(handler, "get_bot", lambda: bot)
+    monkeypatch.setattr(handler, "daily_digest_service", FakeDigestService())
+    monkeypatch.setattr(handler, "conversation_store", FakeConversationStore())
+    monkeypatch.setattr(
+        handler,
+        "daily_digest_config",
+        SimpleNamespace(
+            groups=[
+                SimpleNamespace(
+                    group_id="748245950",
+                    enabled=True,
+                ),
+                SimpleNamespace(
+                    group_id="708695087",
+                    enabled=False,
+                ),
+            ]
+        ),
+    )
+    monkeypatch.setattr(
+        handler,
+        "_cancel_passive_task",
+        lambda group_id: cancelled_groups.append(group_id),
+    )
+    monkeypatch.setattr(
+        handler,
+        "_ensure_conversation_maintenance",
+        lambda group_id, state: maintained.append((group_id, state)),
+    )
+    monkeypatch.setattr(handler, "_reply_locks", {})
+
+    await handler.send_daily_digests()
+
+    assert bot.calls == [
+        (
+            "send_group_msg",
+            {"group_id": 748245950, "message": "上海早报 · 08月25日"},
+        )
+    ]
+    assert cancelled_groups == ["748245950"]
+    assert len(stored_events) == 1
+    assert stored_events[0].group_id == "748245950"
+    assert stored_events[0].source == "llm:daily_digest"
+    assert stored_events[0].platform_message_id == "987"
+    assert len(maintained) == 1
+
+
 def test_direct_finish_requires_llm_reply_after_trigger() -> None:
     nonebot.init()
     handler = importlib.import_module("multi_llm_chat.handler")
