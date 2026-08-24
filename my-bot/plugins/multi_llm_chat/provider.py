@@ -1,13 +1,26 @@
+from __future__ import annotations
+
 import json
+from collections.abc import Sequence
 from pathlib import Path
 from time import perf_counter
-from typing import Any, Dict, Optional, Sequence, Tuple
+from typing import Any
 from uuid import uuid4
 
 from openai import AsyncOpenAI
 
 from .models import AssistantTurn, FunctionCall, ToolCall
-from .raw_request_store import append_raw_request
+from .raw_request_store import (
+    append_raw_error,
+    append_raw_request,
+    append_raw_response,
+)
+
+UPSTREAM_BLOCKED_CONTENT = (
+    "The request was rejected because it was considered high risk"
+)
+UPSTREAM_BLOCKED_NOTICE = "本次请求被上游屏蔽。"
+UPSTREAM_BLOCK_MAX_RETRIES = 3
 
 
 class ProviderConfigurationError(RuntimeError):
@@ -27,10 +40,10 @@ class LLMProvider:
         self._raw_request_log_dir = raw_request_log_dir
         self._logger = logger
         self._routes = self._load_routes()
-        self._client: Optional[AsyncOpenAI] = None
-        self._client_params: Optional[Tuple[str, str, int]] = None
+        self._client: AsyncOpenAI | None = None
+        self._client_params: tuple[str, str, int] | None = None
 
-    def _load_routes(self) -> Dict[str, Any]:
+    def _load_routes(self) -> dict[str, Any]:
         data = json.loads(self._routes_path.read_text(encoding="utf-8"))
         if not isinstance(data.get("providers"), dict) or not isinstance(
             data.get("models"), dict
@@ -38,7 +51,7 @@ class LLMProvider:
             raise ProviderConfigurationError("模型路由缺少 providers 或 models")
         return data
 
-    def _resolve_model(self) -> Tuple[str, Dict[str, Any], Dict[str, Any]]:
+    def _resolve_model(self) -> tuple[str, dict[str, Any], dict[str, Any]]:
         model = self._config.llm_chat_model
         model_config = self._routes["models"].get(model)
         if not isinstance(model_config, dict):
@@ -55,7 +68,7 @@ class LLMProvider:
             )
         return model, provider_config, model_config
 
-    def _client_for(self, provider_config: Dict[str, Any]) -> AsyncOpenAI:
+    def _client_for(self, provider_config: dict[str, Any]) -> AsyncOpenAI:
         api_key_field = str(provider_config.get("api_key_field", ""))
         api_key = str(getattr(self._config, api_key_field, "") or "").strip()
         base_url = _normalize_base_url(str(provider_config.get("base_url", "")))
@@ -83,19 +96,19 @@ class LLMProvider:
 
     async def complete(
         self,
-        messages: Sequence[Dict[str, Any]],
+        messages: Sequence[dict[str, Any]],
         request_type: str,
         turn_id: str,
         step: int,
-        tools: Optional[Sequence[Dict[str, Any]]] = None,
-        tool_choice: Optional[Any] = None,
-        response_format: Optional[Dict[str, Any]] = None,
+        tools: Sequence[dict[str, Any]] | None = None,
+        tool_choice: Any | None = None,
+        response_format: dict[str, Any] | None = None,
         allow_builtin_tools: bool = False,
     ) -> AssistantTurn:
         model, provider_config, model_config = self._resolve_model()
         client = self._client_for(provider_config)
         request_id = uuid4().hex
-        started_at = perf_counter()
+        total_started_at = perf_counter()
         create_kwargs = self._build_request(
             model=model,
             provider_config=provider_config,
@@ -106,41 +119,137 @@ class LLMProvider:
             response_format=response_format,
             allow_builtin_tools=allow_builtin_tools,
         )
-        await append_request_async(
-            directory=self._raw_request_log_dir,
-            request_id=request_id,
-            request_type=request_type,
-            request_body=create_kwargs,
-            metadata={"turn_id": turn_id, "step": step},
-        )
-        self._logger.info(
-            "开始大模型请求: request_id={}, turn_id={}, step={}, "
-            "request_type={}, model={}, message_count={}",
-            request_id,
-            turn_id,
-            step,
-            request_type,
-            model,
-            len(messages),
-        )
-        try:
-            result = await client.chat.completions.create(**create_kwargs)
-        except Exception as error:
-            self._logger.error(
-                "大模型请求失败: request_id={}, turn_id={}, step={}, "
-                "request_type={}, model={}, elapsed_ms={}, error_type={}",
+        common_metadata = {
+            "turn_id": turn_id,
+            "step": step,
+            "model": model,
+        }
+        max_attempts = UPSTREAM_BLOCK_MAX_RETRIES + 1
+        for attempt in range(1, max_attempts + 1):
+            turn, upstream_blocked = await self._complete_attempt(
+                client=client,
+                create_kwargs=create_kwargs,
+                request_id=request_id,
+                request_type=request_type,
+                common_metadata=common_metadata,
+                message_count=len(messages),
+                attempt=attempt,
+                max_attempts=max_attempts,
+                total_started_at=total_started_at,
+            )
+            if not upstream_blocked or attempt == max_attempts:
+                return turn
+            self._logger.warning(  # noqa: PLE1205 - Loguru uses brace formatting.
+                "大模型请求被上游屏蔽，准备重试: request_id={}, turn_id={}, "
+                "step={}, request_type={}, model={}, attempt={}, max_attempts={}",
                 request_id,
                 turn_id,
                 step,
                 request_type,
                 model,
-                round((perf_counter() - started_at) * 1000),
+                attempt,
+                max_attempts,
+            )
+        raise RuntimeError("大模型请求重试状态异常")
+
+    async def _complete_attempt(
+        self,
+        client: AsyncOpenAI,
+        create_kwargs: dict[str, Any],
+        request_id: str,
+        request_type: str,
+        common_metadata: dict[str, Any],
+        message_count: int,
+        attempt: int,
+        max_attempts: int,
+        total_started_at: float,
+    ) -> tuple[AssistantTurn, bool]:
+        attempt_started_at = perf_counter()
+        attempt_metadata = {
+            **common_metadata,
+            "attempt": attempt,
+            "max_attempts": max_attempts,
+        }
+        await append_request_async(
+            directory=self._raw_request_log_dir,
+            request_id=request_id,
+            request_type=request_type,
+            request_body=create_kwargs,
+            metadata=attempt_metadata,
+        )
+        self._logger.info(  # noqa: PLE1205 - Loguru uses brace formatting.
+            "开始大模型请求: request_id={}, turn_id={}, step={}, request_type={}, "
+            "model={}, attempt={}, max_attempts={}, message_count={}",
+            request_id,
+            common_metadata["turn_id"],
+            common_metadata["step"],
+            request_type,
+            common_metadata["model"],
+            attempt,
+            max_attempts,
+            message_count,
+        )
+        raw_response = None
+        try:
+            raw_response = await client.chat.completions.with_raw_response.create(
+                **create_kwargs
+            )
+            result = raw_response.parse()
+        except Exception as error:
+            attempt_elapsed_ms = round((perf_counter() - attempt_started_at) * 1000)
+            total_elapsed_ms = round((perf_counter() - total_started_at) * 1000)
+            status_code = getattr(error, "status_code", None) or getattr(
+                raw_response, "status_code", None
+            )
+            provider_request_id = str(
+                getattr(error, "request_id", "")
+                or getattr(raw_response, "request_id", "")
+                or ""
+            )
+            await append_error_async(
+                directory=self._raw_request_log_dir,
+                request_id=request_id,
+                request_type=request_type,
+                error=_error_record(error, raw_response),
+                metadata={
+                    **attempt_metadata,
+                    "attempt_elapsed_ms": attempt_elapsed_ms,
+                    "total_elapsed_ms": total_elapsed_ms,
+                    "status_code": status_code,
+                    "provider_request_id": provider_request_id,
+                    "response_headers": _diagnostic_response_headers(raw_response),
+                },
+            )
+            self._logger.error(  # noqa: PLE1205 - Loguru uses brace formatting.
+                "大模型请求失败: request_id={}, turn_id={}, step={}, "
+                "request_type={}, model={}, attempt={}, max_attempts={}, "
+                "attempt_elapsed_ms={}, total_elapsed_ms={}, error_type={}, "
+                "status_code={}, provider_request_id={}, error_message={}",
+                request_id,
+                common_metadata["turn_id"],
+                common_metadata["step"],
+                request_type,
+                common_metadata["model"],
+                attempt,
+                max_attempts,
+                attempt_elapsed_ms,
+                total_elapsed_ms,
                 type(error).__name__,
+                status_code,
+                provider_request_id,
+                str(error),
             )
             raise
+
         choice = result.choices[0]
         message = choice.message
-        content = (message.content or "").strip()
+        raw_content = message.content or ""
+        upstream_blocked = raw_content == UPSTREAM_BLOCKED_CONTENT
+        retry_scheduled = upstream_blocked and attempt < max_attempts
+        if upstream_blocked:
+            content = "" if retry_scheduled else UPSTREAM_BLOCKED_NOTICE
+        else:
+            content = raw_content.strip()
         tool_calls = [
             ToolCall(
                 id=call.id,
@@ -153,39 +262,89 @@ class LLMProvider:
             if getattr(call, "type", "function") == "function"
         ]
         usage = result.usage.model_dump() if result.usage else {}
-        self._logger.info(
+        attempt_elapsed_ms = round((perf_counter() - attempt_started_at) * 1000)
+        total_elapsed_ms = round((perf_counter() - total_started_at) * 1000)
+        provider_request_id = str(
+            getattr(raw_response, "request_id", "")
+            or getattr(result, "_request_id", "")
+            or ""
+        )
+        status_code = int(getattr(raw_response, "status_code", 0) or 0)
+        retries_taken = int(getattr(raw_response, "retries_taken", 0) or 0)
+        finish_reason = str(choice.finish_reason or "")
+        await append_response_async(
+            directory=self._raw_request_log_dir,
+            request_id=request_id,
+            request_type=request_type,
+            response_body=_raw_response_body(raw_response),
+            metadata={
+                **attempt_metadata,
+                "attempt_elapsed_ms": attempt_elapsed_ms,
+                "total_elapsed_ms": total_elapsed_ms,
+                "status_code": status_code,
+                "provider_request_id": provider_request_id,
+                "sdk_retries_taken": retries_taken,
+                "response_headers": _diagnostic_response_headers(raw_response),
+            },
+            handling={
+                "upstream_blocked": upstream_blocked,
+                "retry_scheduled": retry_scheduled,
+                "outbound_content": content or None,
+            },
+        )
+        self._logger.info(  # noqa: PLE1205 - Loguru uses brace formatting.
             "完成大模型请求: request_id={}, turn_id={}, step={}, "
-            "request_type={}, model={}, elapsed_ms={}, response_chars={}, "
-            "tool_call_count={}",
+            "request_type={}, model={}, attempt={}, max_attempts={}, "
+            "provider_request_id={}, status_code={}, sdk_retries_taken={}, "
+            "attempt_elapsed_ms={}, total_elapsed_ms={}, finish_reason={}, "
+            "response_chars={}, outbound_chars={}, tool_call_count={}, "
+            "input_tokens={}, output_tokens={}, total_tokens={}, "
+            "upstream_blocked={}, retry_scheduled={}",
             request_id,
-            turn_id,
-            step,
+            common_metadata["turn_id"],
+            common_metadata["step"],
             request_type,
-            model,
-            round((perf_counter() - started_at) * 1000),
+            common_metadata["model"],
+            attempt,
+            max_attempts,
+            provider_request_id,
+            status_code,
+            retries_taken,
+            attempt_elapsed_ms,
+            total_elapsed_ms,
+            finish_reason,
+            len(raw_content),
             len(content),
             len(tool_calls),
+            _usage_value(usage, "input_tokens", "prompt_tokens"),
+            _usage_value(usage, "output_tokens", "completion_tokens"),
+            _usage_total(usage),
+            upstream_blocked,
+            retry_scheduled,
         )
-        return AssistantTurn(
-            content=content,
-            tool_calls=tool_calls,
-            reasoning_content=str(getattr(message, "reasoning_content", "") or ""),
-            finish_reason=str(choice.finish_reason or ""),
-            usage=usage,
+        return (
+            AssistantTurn(
+                content=content,
+                tool_calls=tool_calls,
+                reasoning_content=str(getattr(message, "reasoning_content", "") or ""),
+                finish_reason=finish_reason,
+                usage=usage,
+            ),
+            upstream_blocked,
         )
 
     def _build_request(
         self,
         model: str,
-        provider_config: Dict[str, Any],
-        model_config: Dict[str, Any],
-        messages: Sequence[Dict[str, Any]],
-        tools: Optional[Sequence[Dict[str, Any]]],
-        tool_choice: Optional[Any],
-        response_format: Optional[Dict[str, Any]],
+        provider_config: dict[str, Any],
+        model_config: dict[str, Any],
+        messages: Sequence[dict[str, Any]],
+        tools: Sequence[dict[str, Any]] | None,
+        tool_choice: Any | None,
+        response_format: dict[str, Any] | None,
         allow_builtin_tools: bool,
-    ) -> Dict[str, Any]:
-        create_kwargs: Dict[str, Any] = {
+    ) -> dict[str, Any]:
+        create_kwargs: dict[str, Any] = {
             "model": model,
             "messages": list(messages),
             "temperature": self._config.llm_chat_temperature,
@@ -246,12 +405,86 @@ async def append_request_async(**kwargs: Any) -> None:
     await asyncio.to_thread(append_raw_request, **kwargs)
 
 
+async def append_response_async(**kwargs: Any) -> None:
+    import asyncio
+
+    await asyncio.to_thread(append_raw_response, **kwargs)
+
+
+async def append_error_async(**kwargs: Any) -> None:
+    import asyncio
+
+    await asyncio.to_thread(append_raw_error, **kwargs)
+
+
+def _raw_response_body(raw_response: Any) -> Any:
+    text = str(getattr(raw_response, "text", "") or "")
+    if not text:
+        return None
+    try:
+        return json.loads(text)
+    except json.JSONDecodeError:
+        return text
+
+
+def _diagnostic_response_headers(raw_response: Any) -> dict[str, str]:
+    headers = getattr(raw_response, "headers", {})
+    recorded: dict[str, str] = {}
+    for name, value in headers.items():
+        normalized = str(name).lower()
+        if (
+            normalized.endswith("request-id")
+            or normalized.startswith("x-ratelimit-")
+            or normalized in {"retry-after", "x-stainless-retry-count"}
+        ):
+            recorded[normalized] = str(value)
+    return recorded
+
+
+def _error_record(error: Exception, raw_response: Any = None) -> dict[str, Any]:
+    body = getattr(error, "body", None)
+    response = getattr(error, "response", None)
+    if response is None:
+        response = raw_response
+    if body is None and response is not None:
+        response_text = str(getattr(response, "text", "") or "")
+        if response_text:
+            try:
+                body = json.loads(response_text)
+            except json.JSONDecodeError:
+                body = response_text
+    return {
+        "type": type(error).__name__,
+        "message": str(error),
+        "status_code": getattr(error, "status_code", None),
+        "provider_request_id": str(getattr(error, "request_id", "") or ""),
+        "body": body,
+    }
+
+
+def _usage_value(usage: dict[str, Any], *field_names: str) -> Any:
+    for field_name in field_names:
+        if field_name in usage:
+            return usage[field_name]
+    return None
+
+
+def _usage_total(usage: dict[str, Any]) -> Any:
+    if "total_tokens" in usage:
+        return usage["total_tokens"]
+    input_tokens = _usage_value(usage, "input_tokens", "prompt_tokens")
+    output_tokens = _usage_value(usage, "output_tokens", "completion_tokens")
+    if isinstance(input_tokens, int) and isinstance(output_tokens, int):
+        return input_tokens + output_tokens
+    return None
+
+
 def _normalize_base_url(url: str) -> str:
     normalized = url.strip().removesuffix("/chat/completions")
     return normalized.rstrip("/")
 
 
-def _thinking_enabled(create_kwargs: Dict[str, Any]) -> bool:
+def _thinking_enabled(create_kwargs: dict[str, Any]) -> bool:
     extra_body = create_kwargs.get("extra_body")
     if not isinstance(extra_body, dict):
         return False

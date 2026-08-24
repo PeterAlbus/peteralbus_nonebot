@@ -11,7 +11,12 @@ PLUGIN_DIR = (
 )
 sys.path.insert(0, str(PLUGIN_DIR))
 
-from raw_request_store import append_raw_request, cleanup_raw_request_logs  # noqa: E402
+from raw_request_store import (
+    append_raw_error,
+    append_raw_request,
+    append_raw_response,
+    cleanup_raw_request_logs,
+)
 
 
 class RawRequestStoreTest(unittest.TestCase):
@@ -45,6 +50,7 @@ class RawRequestStoreTest(unittest.TestCase):
             [
                 {
                     "recorded_at": "2026-08-22T12:30:00+00:00",
+                    "kind": "request",
                     "request_id": "request-1",
                     "request_type": "memory_maintenance",
                     "metadata": {},
@@ -84,10 +90,52 @@ class RawRequestStoreTest(unittest.TestCase):
                 "$image_base64_omitted": {
                     "mime_type": "image/png",
                     "encoded_chars": 8,
+                    "encoded_sha256": (
+                        "333d6b3a3c1f5db6c9bdda5939b13698"
+                        "6d170f4649172a68368d54ecb44c2ff2"
+                    ),
                 }
             },
         )
         self.assertNotIn("aGVsbG8=", json.dumps(record))
+
+    def test_append_response_and_error_share_request_correlation_fields(self):
+        recorded_at = datetime(2026, 8, 22, 12, 30, tzinfo=timezone.utc)
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            directory = Path(temp_dir)
+            log_path = append_raw_response(
+                directory=directory,
+                request_id="request-1",
+                request_type="direct_chat_agent",
+                response_body={"choices": [{"message": {"content": "原始回复"}}]},
+                metadata={"provider_request_id": "upstream-1", "status_code": 200},
+                handling={"upstream_blocked": False, "outbound_content": "原始回复"},
+                now=recorded_at,
+            )
+            append_raw_error(
+                directory=directory,
+                request_id="request-2",
+                request_type="direct_chat_agent",
+                error={"type": "BadRequestError", "body": {"code": "blocked"}},
+                metadata={"provider_request_id": "upstream-2", "status_code": 400},
+                now=recorded_at,
+            )
+            records = [
+                json.loads(line)
+                for line in log_path.read_text(encoding="utf-8").splitlines()
+            ]
+
+        self.assertEqual(records[0]["kind"], "response")
+        self.assertEqual(records[0]["request_id"], "request-1")
+        self.assertEqual(
+            records[0]["response"]["choices"][0]["message"]["content"],
+            "原始回复",
+        )
+        self.assertEqual(records[0]["handling"]["outbound_content"], "原始回复")
+        self.assertEqual(records[1]["kind"], "error")
+        self.assertEqual(records[1]["request_id"], "request-2")
+        self.assertEqual(records[1]["error"]["body"]["code"], "blocked")
 
     def test_cleanup_deletes_only_logs_older_than_retention_window(self):
         with tempfile.TemporaryDirectory() as temp_dir:
