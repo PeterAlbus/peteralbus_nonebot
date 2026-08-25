@@ -210,6 +210,8 @@ async def test_direct_context_keeps_empty_trigger_distinct_from_queued_messages(
     )
     assert "finish_without_reply" not in messages_without_finish[0]["content"]
     assert "本轮必须回应触发用户的实际意图" in messages_without_finish[0]["content"]
+    assert "优先调用 reply_to_event" in messages_without_finish[0]["content"]
+    assert "真正被回答的那条消息" in messages_without_finish[0]["content"]
 
 
 def test_pinned_aliases_use_user_id_without_group_scope(tmp_path):

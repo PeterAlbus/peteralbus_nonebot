@@ -38,7 +38,9 @@ DIRECT_TURN_SYSTEM_PROMPT = """本轮模式：direct
 """
 
 
-DIRECT_TURN_REPLY_REQUIRED_SYSTEM_PROMPT = """工程化状态表明：本轮触发事件之后，没有小P产生的新回复。本轮必须回应触发用户的实际意图。"""
+DIRECT_TURN_REPLY_REQUIRED_SYSTEM_PROMPT = """工程化状态表明：本轮触发事件之后，没有小P产生的新回复。本轮必须回应触发用户的实际意图。
+
+如果答复明确针对某一条近期消息，优先调用 reply_to_event 引用真正被回答的那条消息，再输出正文；不要一律引用最新触发事件。引用目标仍必须满足 recent_event_metadata 中 reply_available 为 true。没有可引用目标或答复面向整个话题时，直接输出正文。"""
 
 
 DIRECT_TURN_FINISH_SYSTEM_PROMPT = """工程化状态表明：本轮触发事件之后，小P已经产生了至少一条新的回复。
