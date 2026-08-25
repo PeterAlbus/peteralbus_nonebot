@@ -28,6 +28,7 @@ class ContextBuilder:
         roster_service: GroupRosterService,
         memory_store: GroupMemoryStore,
         image_store: ImageStore,
+        self_knowledge: str,
         char_budget: int,
         recent_event_min_count: int,
         max_events: int,
@@ -35,6 +36,9 @@ class ContextBuilder:
         self._roster_service = roster_service
         self._memory_store = memory_store
         self._image_store = image_store
+        self._self_knowledge = self_knowledge.strip()
+        if not self._self_knowledge:
+            raise ValueError("小P自我认知文档不能为空")
         self._char_budget = max(4000, char_budget)
         self._recent_event_min_count = max(1, recent_event_min_count)
         self._max_events = max(self._recent_event_min_count + 1, max_events)
@@ -91,6 +95,8 @@ class ContextBuilder:
         trigger_metadata["content"] = trigger_event.content
         policy_prompt = (
             PERSONA_SYSTEM_PROMPT
+            + "\n\n"
+            + self._self_knowledge
             + "\n\n"
             + _turn_prompt(
                 turn_mode,

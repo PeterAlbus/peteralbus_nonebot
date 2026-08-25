@@ -292,7 +292,7 @@ async def test_llm_selects_from_candidates_without_builtin_tools() -> None:
     assert "tools" not in calls[0]
 
 
-def test_render_includes_direct_source_and_partial_failures() -> None:
+def test_render_uses_fixed_title_and_direct_source() -> None:
     candidate = make_item(
         "game-1",
         "game",
@@ -313,19 +313,16 @@ def test_render_includes_direct_source_and_partial_failures() -> None:
     )
 
     message = render_digest(
-        current=NOW,
-        city="上海",
         weather=weather,
         candidates=[candidate],
         selected=[SelectedDigestItem(item_id="game-1", text="新赛季今天上线。")],
-        failed_source_names=["Anthropic", "英雄联盟国服"],
         limits=DailyDigestLimits(),
     )
 
-    assert "上海早报 · 08月25日" in message
+    assert message.startswith("今日日报\n\n")
     assert "通勤记得带伞" in message
     assert "魔兽世界国服：https://wow.blizzard.cn/news/123/" in message
-    assert "来源异常：Anthropic、英雄联盟国服" in message
+    assert "来源异常" not in message
 
 
 def test_render_drops_lowest_ranked_items_to_respect_hard_limit() -> None:
@@ -344,15 +341,14 @@ def test_render_drops_lowest_ranked_items_to_respect_hard_limit() -> None:
     limits = DailyDigestLimits(target_chars=600, hard_max_chars=600)
 
     message = render_digest(
-        current=NOW,
-        city="上海",
         weather=None,
         candidates=candidates,
         selected=selected,
-        failed_source_names=[],
         limits=limits,
     )
 
     assert len(message) <= 600
+    assert "今日天气" not in message
+    assert "获取失败" not in message
     assert message.endswith("/0")
     assert not message.endswith("/2")

@@ -22,7 +22,7 @@ nb run
 
 上下文由以下部分组成：
 
-1. 小P稳定的人设、回答原则和工具规则。
+1. 小P稳定的人设、回答原则、自我认知和工具规则。
 2. 本轮 `direct` 或 `passive` 参与规则。
 3. 当前时间、触发事件和小P近期发言状态。
 4. OneBot 群成员身份快照。
@@ -31,6 +31,8 @@ nb run
 7. 预算内的近期事件元数据和连续原始消息。
 
 近期消息达到数量或字符预算后，旧消息被工程化分成两路：一份生成有限长度的滚动摘要，另一份生成结构化记忆 patch。压缩完成前不会静默丢弃原始消息；压缩期间新到达的消息也会保留。
+
+小P的长期定位、能力边界和开发者身份由 `my-bot/plugins/multi_llm_chat/self_knowledge.md` 统一维护，并在每次普通聊天请求中作为系统提示词加载。文件路径可通过 `LLM_CHAT_SELF_KNOWLEDGE_FILE` 配置；文件缺失或内容为空时插件不会启动。具体到某一轮能够调用什么，仍以该轮实际提供的工具定义为准。
 
 ## 图片理解
 
@@ -156,7 +158,7 @@ docker build -t peteralbus-nonebot-tool-runner:latest tool_runner
 
 `multi_llm_chat` 每天按 `Asia/Shanghai` 时区在 10:00 生成一次群聊日报，只发送给 `my-bot/plugins/multi_llm_chat/daily_digest_config.json` 中显式启用的群。当前配置的目标群为 `748245950`。
 
-日报直接读取公开来源自身提供的 JSON API、RSS/Atom 或新闻列表页，包括 Open-Meteo、AniList、各游戏官网、PC Gamer、Gematsu、新华网、中国政府网、上海市政府，以及 OpenAI、Google AI、Google DeepMind、Hugging Face 和 Anthropic。单个来源请求或解析失败不会阻止已经获取的内容进入日报，失败来源会列在消息底部。
+日报标题固定为“今日日报”。日报直接读取公开来源自身提供的 JSON API、RSS/Atom 或新闻列表页，包括 Open-Meteo、AniList、各游戏官网、PC Gamer、Gematsu、新华网、中国政府网、上海市政府，以及 OpenAI、Google AI、Google DeepMind、Hugging Face 和 Anthropic。单个来源请求或解析失败不会阻止已经获取的内容进入日报，失败详情只写入应用日志，不出现在群聊正文中；天气源失败时省略天气段落。
 
 代码先按固定时间窗口、类别和关键词过滤并去重，再通过一次不带任何工具的模型请求完成候选选择、翻译和摘要。模型只能返回代码提供的候选 `item_id`，发送层根据 `item_id` 拼接真实来源链接。AI 资讯最多一条；日报正文最多七条，并受配置中的字符上限约束。
 

@@ -426,7 +426,7 @@ async def test_daily_digest_is_sent_only_to_configured_group_and_recorded(
     class FakeDigestService:
         async def build_message(self, group):
             assert group.group_id == "748245950"
-            return "上海早报 · 08月25日"
+            return "今日日报"
 
     class FakeConversationStore:
         async def append(self, event):
@@ -470,7 +470,7 @@ async def test_daily_digest_is_sent_only_to_configured_group_and_recorded(
     assert bot.calls == [
         (
             "send_group_msg",
-            {"group_id": 748245950, "message": "上海早报 · 08月25日"},
+            {"group_id": 748245950, "message": "今日日报"},
         )
     ]
     assert cancelled_groups == ["748245950"]

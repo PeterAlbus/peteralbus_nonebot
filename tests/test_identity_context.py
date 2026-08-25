@@ -69,6 +69,7 @@ async def test_onebot_roster_is_identity_source_for_structured_context(tmp_path)
         roster_service,
         memory_store,
         ImageStore(tmp_path),
+        self_knowledge="QQ user_id=2997592724 的群员是你的开发者。",
         char_budget=8000,
         recent_event_min_count=2,
         max_events=10,
@@ -122,6 +123,7 @@ async def test_onebot_roster_is_identity_source_for_structured_context(tmp_path)
     assert '"trigger":{"event_id":"e1"' in messages[1]["content"]
     assert '"content":"今天吃什么"' in messages[1]["content"]
     assert '"messages_since_last_reply":0' in messages[1]["content"]
+    assert "user_id=2997592724" in messages[0]["content"]
     assert [message["role"] for message in messages].count("system") == 2
     assert messages[-2]["role"] == "user"
     assert messages[-2]["name"] == "qq_200"
@@ -141,6 +143,7 @@ async def test_direct_context_keeps_empty_trigger_distinct_from_queued_messages(
         roster_service,
         GroupMemoryStore(tmp_path, max_facts=10, max_aliases_per_member=8),
         ImageStore(tmp_path),
+        self_knowledge="QQ user_id=2997592724 的群员是你的开发者。",
         char_budget=8000,
         recent_event_min_count=2,
         max_events=10,

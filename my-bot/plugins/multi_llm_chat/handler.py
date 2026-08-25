@@ -58,6 +58,10 @@ identity_config_path = _resolve_plugin_path(
     config.llm_chat_identity_config_file,
     "identity_config.json",
 )
+self_knowledge_path = _resolve_plugin_path(
+    config.llm_chat_self_knowledge_file,
+    "self_knowledge.md",
+)
 daily_digest_config_path = _resolve_plugin_path(
     config.llm_chat_daily_digest_config_file,
     "daily_digest_config.json",
@@ -92,6 +96,9 @@ provider = LLMProvider(
     logger=logger,
 )
 daily_digest_config = load_daily_digest_config(daily_digest_config_path)
+self_knowledge = self_knowledge_path.read_text(encoding="utf-8").strip()
+if not self_knowledge:
+    raise ValueError(f"小P自我认知文档不能为空: {self_knowledge_path}")
 daily_digest_service = DailyDigestService(
     provider=provider,
     config=daily_digest_config,
@@ -101,6 +108,7 @@ context_builder = ContextBuilder(
     roster_service=roster_service,
     memory_store=memory_store,
     image_store=image_store,
+    self_knowledge=self_knowledge,
     char_budget=config.llm_chat_context_char_budget,
     recent_event_min_count=config.llm_chat_recent_event_min_count,
     max_events=config.llm_chat_conversation_max_events,

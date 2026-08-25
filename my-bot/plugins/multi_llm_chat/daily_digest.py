@@ -234,11 +234,6 @@ class SourceResult:
     source_id: str
     source_name: str
     items: list[DigestItem] = field(default_factory=list)
-    error: str = ""
-
-    @property
-    def succeeded(self) -> bool:
-        return not self.error
 
 
 @dataclass
@@ -259,7 +254,6 @@ class WeatherReport:
 class DigestCollection:
     weather: WeatherReport | None
     items: list[DigestItem]
-    failed_source_names: list[str]
 
 
 FEED_SOURCES: tuple[FeedSource, ...] = (
@@ -407,12 +401,9 @@ class DailyDigestService:
         if collection.items:
             selected = await self._select_items(collection.items, current)
         return render_digest(
-            current=current,
-            city=group.city,
             weather=collection.weather,
             candidates=collection.items,
             selected=selected,
-            failed_source_names=collection.failed_source_names,
             limits=self._config.limits,
         )
 
@@ -465,13 +456,9 @@ class DailyDigestService:
             if _is_candidate(item, window_start, current)
         ]
         items = _deduplicate_items(filtered)
-        failures = [result.source_name for result in results if not result.succeeded]
-        if weather is None:
-            failures.insert(0, "Open-Meteo")
         return DigestCollection(
             weather=weather,
             items=_limit_candidates(items),
-            failed_source_names=_unique(failures),
         )
 
     async def _collect_weather_safely(
@@ -502,7 +489,6 @@ class DailyDigestService:
             return SourceResult(
                 source_id=source.source_id,
                 source_name=source.source_name,
-                error=type(error).__name__,
             )
 
     async def _collect_html_safely(
@@ -522,7 +508,6 @@ class DailyDigestService:
             return SourceResult(
                 source_id=source.source_id,
                 source_name=source.source_name,
-                error=type(error).__name__,
             )
 
     async def _collect_anilist_safely(
@@ -542,7 +527,6 @@ class DailyDigestService:
             return SourceResult(
                 source_id="anilist_schedule",
                 source_name="AniList",
-                error=type(error).__name__,
             )
 
     async def _collect_json_news_safely(
@@ -563,7 +547,6 @@ class DailyDigestService:
             return SourceResult(
                 source_id=source.source_id,
                 source_name=source.source_name,
-                error=type(error).__name__,
             )
 
     def _log_source_error(
@@ -988,24 +971,18 @@ def validate_selection(
 
 
 def render_digest(
-    current: datetime,
-    city: str,
     weather: WeatherReport | None,
     candidates: Sequence[DigestItem],
     selected: Sequence[SelectedDigestItem],
-    failed_source_names: Sequence[str],
     limits: DailyDigestLimits,
 ) -> str:
     candidate_map = {item.item_id: item for item in candidates}
     kept = list(selected)
     while True:
         message = _render_digest_once(
-            current=current,
-            city=city,
             weather=weather,
             candidate_map=candidate_map,
             selected=kept,
-            failed_source_names=failed_source_names,
         )
         if len(message) <= limits.hard_max_chars:
             return message
@@ -1015,15 +992,13 @@ def render_digest(
 
 
 def _render_digest_once(
-    current: datetime,
-    city: str,
     weather: WeatherReport | None,
     candidate_map: dict[str, DigestItem],
     selected: Sequence[SelectedDigestItem],
-    failed_source_names: Sequence[str],
 ) -> str:
-    sections = [f"{city}早报 · {current:%m月%d日}"]
-    sections.append("【今日天气】\n" + _weather_text(weather, city))
+    sections = ["今日日报"]
+    if weather is not None:
+        sections.append("【今日天气】\n" + _weather_text(weather))
     grouped: dict[str, list[str]] = {category: [] for category in CATEGORY_LABELS}
     for chosen in selected:
         item = candidate_map[chosen.item_id]
@@ -1035,14 +1010,10 @@ def _render_digest_once(
             sections.append(f"【{label}】\n" + "\n".join(grouped[category]))
     if not selected:
         sections.append("过去24小时暂无达到筛选条件的资讯。")
-    if failed_source_names:
-        sections.append("来源异常：" + "、".join(_unique(failed_source_names)))
     return "\n\n".join(sections)
 
 
-def _weather_text(weather: WeatherReport | None, city: str) -> str:
-    if weather is None:
-        return f"{city}天气获取失败。"
+def _weather_text(weather: WeatherReport) -> str:
     text = (
         f"{weather.condition}，{weather.temperature_min:g}～"
         f"{weather.temperature_max:g}℃，体感 "
