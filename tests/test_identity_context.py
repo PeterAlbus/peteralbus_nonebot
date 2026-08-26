@@ -124,6 +124,8 @@ async def test_onebot_roster_is_identity_source_for_structured_context(tmp_path)
     assert '"content":"今天吃什么"' in messages[1]["content"]
     assert '"messages_since_last_reply":0' in messages[1]["content"]
     assert "user_id=2997592724" in messages[0]["content"]
+    assert "最终回复使用群聊纯文本" in messages[0]["content"]
+    assert "不要为了延续对话强行反问" in messages[0]["content"]
     assert [message["role"] for message in messages].count("system") == 2
     assert messages[-2]["role"] == "user"
     assert messages[-2]["name"] == "qq_200"
