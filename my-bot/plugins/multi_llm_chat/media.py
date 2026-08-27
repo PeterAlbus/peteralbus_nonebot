@@ -96,12 +96,16 @@ class ImageStore:
     async def build_content(
         self,
         event: ChatEvent,
-        include_images: bool,
+        image_indices: Sequence[int],
     ) -> Any:
-        if not include_images or not event.images:
+        selected_indices = list(dict.fromkeys(image_indices))
+        if not selected_indices:
             return event.content
-        data_urls = await self.data_urls(event.images)
-        return build_multimodal_content(event.content, event.images, data_urls)
+        if any(index < 0 or index >= len(event.images) for index in selected_indices):
+            raise IndexError("图片序号超出事件图片范围")
+        selected_images = [event.images[index] for index in selected_indices]
+        data_urls = await self.data_urls(selected_images)
+        return build_multimodal_content(event.content, selected_images, data_urls)
 
     async def build_payload_content(
         self,

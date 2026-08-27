@@ -21,7 +21,7 @@ def event_with_image(resource):
 
 
 @pytest.mark.asyncio
-async def test_image_store_preserves_text_order_and_builds_base64_only_when_enabled(
+async def test_image_store_preserves_text_order_and_builds_only_selected_image(
     tmp_path,
 ):
     store = ImageStore(tmp_path)
@@ -33,14 +33,14 @@ async def test_image_store_preserves_text_order_and_builds_base64_only_when_enab
     )
     event = event_with_image(resource)
 
-    disabled_content = await store.build_content(event, include_images=False)
-    enabled_content = await store.build_content(event, include_images=True)
+    text_content = await store.build_content(event, image_indices=[])
+    selected_content = await store.build_content(event, image_indices=[0])
 
-    assert disabled_content == "前[图片]后"
-    assert enabled_content[0] == {"type": "text", "text": "前"}
-    assert enabled_content[1]["type"] == "image_url"
-    assert enabled_content[1]["image_url"]["url"].startswith("data:image/png;base64,")
-    assert enabled_content[2] == {"type": "text", "text": "后"}
+    assert text_content == "前[图片]后"
+    assert selected_content[0] == {"type": "text", "text": "前"}
+    assert selected_content[1]["type"] == "image_url"
+    assert selected_content[1]["image_url"]["url"].startswith("data:image/png;base64,")
+    assert selected_content[2] == {"type": "text", "text": "后"}
     assert (tmp_path / "media" / resource.media_key).read_bytes() == PNG_DATA
 
 

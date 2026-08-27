@@ -9,6 +9,7 @@ from uuid import uuid4
 
 from openai import AsyncOpenAI
 
+from .conversation import INTERNAL_EVENT_CONTEXT_MARKER
 from .models import AssistantTurn, FunctionCall, ToolCall
 from .raw_request_store import (
     append_raw_error,
@@ -24,6 +25,10 @@ UPSTREAM_BLOCK_MAX_RETRIES = 3
 
 
 class ProviderConfigurationError(RuntimeError):
+    pass
+
+
+class ProviderResponseError(RuntimeError):
     pass
 
 
@@ -246,10 +251,18 @@ class LLMProvider:
         raw_content = message.content or ""
         upstream_blocked = raw_content == UPSTREAM_BLOCKED_CONTENT
         retry_scheduled = upstream_blocked and attempt < max_attempts
+        embedded_reasoning_removed = False
+        output_rejection = ""
         if upstream_blocked:
             content = "" if retry_scheduled else UPSTREAM_BLOCKED_NOTICE
         else:
-            content = raw_content.strip()
+            try:
+                content, embedded_reasoning_removed = normalize_outbound_content(
+                    raw_content
+                )
+            except ProviderResponseError as error:
+                content = ""
+                output_rejection = str(error)
         tool_calls = [
             ToolCall(
                 id=call.id,
@@ -289,6 +302,8 @@ class LLMProvider:
             handling={
                 "upstream_blocked": upstream_blocked,
                 "retry_scheduled": retry_scheduled,
+                "embedded_reasoning_removed": embedded_reasoning_removed,
+                "output_rejection": output_rejection or None,
                 "outbound_content": content or None,
             },
         )
@@ -299,7 +314,8 @@ class LLMProvider:
             "attempt_elapsed_ms={}, total_elapsed_ms={}, finish_reason={}, "
             "response_chars={}, outbound_chars={}, tool_call_count={}, "
             "input_tokens={}, output_tokens={}, total_tokens={}, "
-            "upstream_blocked={}, retry_scheduled={}",
+            "upstream_blocked={}, retry_scheduled={}, "
+            "embedded_reasoning_removed={}, output_rejected={}",
             request_id,
             common_metadata["turn_id"],
             common_metadata["step"],
@@ -321,7 +337,21 @@ class LLMProvider:
             _usage_total(usage),
             upstream_blocked,
             retry_scheduled,
+            embedded_reasoning_removed,
+            bool(output_rejection),
         )
+        if output_rejection:
+            self._logger.error(  # noqa: PLE1205 - Loguru uses brace formatting.
+                "拒绝使用包含内部内容的模型响应: request_id={}, turn_id={}, "
+                "step={}, request_type={}, model={}, reason={}",
+                request_id,
+                common_metadata["turn_id"],
+                common_metadata["step"],
+                request_type,
+                common_metadata["model"],
+                output_rejection,
+            )
+            raise ProviderResponseError(output_rejection)
         return (
             AssistantTurn(
                 content=content,
@@ -493,3 +523,17 @@ def _thinking_enabled(create_kwargs: dict[str, Any]) -> bool:
         isinstance(thinking, dict)
         and str(thinking.get("type", "")).lower() == "enabled"
     )
+
+
+def normalize_outbound_content(raw_content: str) -> tuple[str, bool]:
+    content = raw_content.strip()
+    embedded_reasoning_removed = False
+    if "</think>" in content:
+        _, content = content.rsplit("</think>", 1)
+        content = content.strip()
+        embedded_reasoning_removed = True
+    if "<think" in content or "</think>" in content:
+        raise ProviderResponseError("模型响应包含无法完整分离的思考内容")
+    if INTERNAL_EVENT_CONTEXT_MARKER in content:
+        raise ProviderResponseError("模型响应包含内部群聊消息上下文")
+    return content, embedded_reasoning_removed

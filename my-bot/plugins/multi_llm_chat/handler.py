@@ -131,6 +131,8 @@ agent_runner = AgentRunner(
     provider=provider,
     registry=tool_registry,
     cli_runner=cli_runner,
+    conversation_store=conversation_store,
+    image_store=image_store,
     max_steps=config.llm_chat_max_tool_steps,
 )
 conversation_maintainer = ConversationMaintainer(
@@ -360,7 +362,7 @@ async def _run_reply(
         state,
         trigger_event,
     )
-    agent_messages = await context_builder.build(
+    agent_context = await context_builder.build(
         trigger_event.group_id,
         state,
         turn_mode=turn_mode,
@@ -369,7 +371,7 @@ async def _run_reply(
         include_images=provider.image_understanding_enabled(),
     )
     result = await agent_runner.run(
-        messages=agent_messages,
+        messages=agent_context.messages,
         turn_id=uuid4().hex,
         group_id=trigger_event.group_id,
         triggering_user_id=trigger_event.user_id or "",
@@ -378,6 +380,7 @@ async def _run_reply(
         allow_finish_without_reply=allow_finish_without_reply,
         replyable_event_ids=sorted(reply_targets),
         mentionable_user_ids=mentionable_user_ids,
+        readable_image_refs=agent_context.readable_image_refs,
     )
     if result.action == "skip":
         logger.debug(

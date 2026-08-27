@@ -98,13 +98,14 @@ async def test_onebot_roster_is_identity_source_for_structured_context(tmp_path)
         ],
     )
 
-    messages = await builder.build(
+    context = await builder.build(
         "100",
         state,
         turn_mode="passive",
         trigger_event=state.recent_events[0],
         allow_finish_without_reply=True,
     )
+    messages = context.messages
 
     assert roster.group_name == "测试群"
     assert {call[0] for call in bot.calls} == {
@@ -115,14 +116,16 @@ async def test_onebot_roster_is_identity_source_for_structured_context(tmp_path)
         data for api, data in bot.calls if api == "get_group_member_list"
     )
     assert member_list_call == {"group_id": 100}
-    assert "明哥 [user_id=200]" in messages[1]["content"]
+    assert (
+        '"conversation":{"platform":"onebot_v11","type":"group"'
+        in messages[1]["content"]
+    )
+    assert '"group_name":"测试群"' in messages[1]["content"]
     assert '"pinned_aliases":["明先生"]' in messages[1]["content"]
-    assert "2026-08-22T12:00:00+08:00" in messages[1]["content"]
-    assert '"source_plugin":"nonebot_plugin_whateat_pic"' in messages[1]["content"]
     assert '"mode":"passive"' in messages[1]["content"]
-    assert '"trigger":{"event_id":"e1"' in messages[1]["content"]
-    assert '"content":"今天吃什么"' in messages[1]["content"]
+    assert '"trigger_event_id":"e1"' in messages[1]["content"]
     assert '"messages_since_last_reply":0' in messages[1]["content"]
+    assert "recent_event_metadata" not in messages[1]["content"]
     assert "user_id=2997592724" in messages[0]["content"]
     assert "最终回复使用群聊纯文本" in messages[0]["content"]
     assert "不要为了延续对话强行反问" in messages[0]["content"]
@@ -131,9 +134,14 @@ async def test_onebot_roster_is_identity_source_for_structured_context(tmp_path)
     assert [message["role"] for message in messages].count("system") == 2
     assert messages[-2]["role"] == "user"
     assert messages[-2]["name"] == "qq_200"
-    assert messages[-2]["content"] == "今天吃什么"
+    assert 'sender="明哥 [user_id=200]"' in messages[-2]["content"]
+    assert 'sent_at="2026-08-22T12:00:00+08:00"' in messages[-2]["content"]
+    assert messages[-2]["content"].endswith("消息正文：\n今天吃什么")
     assert messages[-1]["role"] == "assistant"
-    assert messages[-1]["content"] == "推荐吃面"
+    assert 'source_plugin="nonebot_plugin_whateat_pic"' in messages[-1]["content"]
+    assert 'sender="小P"' in messages[-1]["content"]
+    assert messages[-1]["content"].endswith("消息正文：\n推荐吃面")
+    assert context.readable_image_refs == ()
 
 
 @pytest.mark.asyncio
@@ -187,35 +195,111 @@ async def test_direct_context_keeps_empty_trigger_distinct_from_queued_messages(
         recent_events=[question, empty_mention, queued_reply],
     )
 
-    messages = await builder.build(
+    context = await builder.build(
         "100",
         state,
         turn_mode="direct",
         trigger_event=empty_mention,
         allow_finish_without_reply=True,
     )
+    messages = context.messages
 
     runtime = messages[1]["content"]
     assert '"mode":"direct"' in runtime
-    assert '"trigger":{"event_id":"mention"' in runtime
-    assert '"sender":"用户200 [user_id=200]"' in runtime
-    assert '"content":""' in runtime
+    assert '"trigger_event_id":"mention"' in runtime
+    mention_message = messages[-2]["content"]
+    assert 'event_id="mention"' in mention_message
+    assert 'sender="用户200 [user_id=200]"' in mention_message
+    assert mention_message.endswith("消息正文：\n")
     assert messages[-1]["role"] == "assistant"
-    assert "turn.trigger" in messages[0]["content"]
-    assert "触发前最近的连续消息" in messages[0]["content"]
+    assert "turn.trigger_event_id" in messages[0]["content"]
+    assert "同一 user_id 在触发前最近的连续消息" in messages[0]["content"]
     assert "finish_without_reply" in messages[0]["content"]
 
-    messages_without_finish = await builder.build(
+    context_without_finish = await builder.build(
         "100",
         state,
         turn_mode="direct",
         trigger_event=empty_mention,
         allow_finish_without_reply=False,
     )
+    messages_without_finish = context_without_finish.messages
     assert "finish_without_reply" not in messages_without_finish[0]["content"]
     assert "本轮必须回应触发用户的实际意图" in messages_without_finish[0]["content"]
     assert "优先调用 reply_to_event" in messages_without_finish[0]["content"]
     assert "真正被回答的那条消息" in messages_without_finish[0]["content"]
+
+
+@pytest.mark.asyncio
+async def test_context_inlines_only_latest_image_and_exposes_older_reference(
+    tmp_path,
+):
+    identity_path = tmp_path / "identity.json"
+    write_identity_config(identity_path)
+    roster_service = GroupRosterService(tmp_path, identity_path)
+    image_store = ImageStore(tmp_path)
+    first_image = await image_store.store_bytes(
+        b"\x89PNG\r\n\x1a\nfirst",
+        placeholder="[图片]",
+        content_offset=1,
+        media_namespace="onebot:100:first",
+    )
+    latest_image = await image_store.store_bytes(
+        b"\x89PNG\r\n\x1a\nlatest",
+        placeholder="[图片]",
+        content_offset=1,
+        media_namespace="onebot:100:latest",
+    )
+    events = [
+        ChatEvent(
+            event_id="first-image",
+            group_id="100",
+            role="user",
+            source="onebot",
+            user_id="200",
+            content="甲[图片]",
+            images=[first_image],
+            sent_at=datetime(2026, 8, 24, 4, 0, tzinfo=timezone.utc),
+        ),
+        ChatEvent(
+            event_id="latest-image",
+            group_id="100",
+            role="user",
+            source="onebot",
+            user_id="201",
+            content="乙[图片]",
+            images=[latest_image],
+            sent_at=datetime(2026, 8, 24, 4, 1, tzinfo=timezone.utc),
+        ),
+    ]
+    builder = ContextBuilder(
+        roster_service,
+        GroupMemoryStore(tmp_path, max_facts=10, max_aliases_per_member=8),
+        image_store,
+        self_knowledge="QQ user_id=2997592724 的群员是你的开发者。",
+        char_budget=8000,
+        recent_event_min_count=2,
+        max_events=10,
+    )
+
+    context = await builder.build(
+        "100",
+        ConversationState(group_id="100", recent_events=events),
+        turn_mode="direct",
+        trigger_event=events[-1],
+        allow_finish_without_reply=False,
+        include_images=True,
+    )
+
+    first_content = context.messages[-2]["content"]
+    latest_content = context.messages[-1]["content"]
+    assert isinstance(first_content, str)
+    assert '"status":"可调用read_group_image读取"' in first_content
+    assert first_content.endswith("消息正文：\n甲[图片]")
+    assert isinstance(latest_content, list)
+    assert '"status":"已直接提供"' in latest_content[0]["text"]
+    assert sum(part["type"] == "image_url" for part in latest_content) == 1
+    assert context.readable_image_refs == (("first-image", 0),)
 
 
 def test_pinned_aliases_use_user_id_without_group_scope(tmp_path):

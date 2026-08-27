@@ -20,7 +20,9 @@ from typing import (
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 from .cli_runner import DockerCliRunner
+from .conversation import ConversationStore
 from .identity import GroupRosterService
+from .media import ImageDownloadError, ImageStore
 from .memory import GroupMemoryStore, normalize_memory_text
 from .provider import LLMProvider
 
@@ -68,9 +70,15 @@ class MentionMembersArguments(ToolArguments):
     user_ids: List[str] = Field(min_length=1, max_length=8)
 
 
+class ReadGroupImageArguments(ToolArguments):
+    event_id: str = Field(min_length=1, max_length=200)
+    image_index: int = Field(ge=0)
+
+
 FINISH_WITHOUT_REPLY_TOOL_NAME = "finish_without_reply"
 REPLY_TO_EVENT_TOOL_NAME = "reply_to_event"
 MENTION_MEMBERS_TOOL_NAME = "mention_members"
+READ_GROUP_IMAGE_TOOL_NAME = "read_group_image"
 
 
 @dataclass(frozen=True)
@@ -246,11 +254,15 @@ class AgentRunner:
         provider: LLMProvider,
         registry: ToolRegistry,
         cli_runner: DockerCliRunner,
+        conversation_store: ConversationStore,
+        image_store: ImageStore,
         max_steps: int,
     ) -> None:
         self._provider = provider
         self._registry = registry
         self._cli_runner = cli_runner
+        self._conversation_store = conversation_store
+        self._image_store = image_store
         self._max_steps = max(1, max_steps)
 
     async def run(
@@ -264,6 +276,7 @@ class AgentRunner:
         allow_finish_without_reply: bool,
         replyable_event_ids: Sequence[str],
         mentionable_user_ids: Sequence[str],
+        readable_image_refs: Sequence[Tuple[str, int]],
     ) -> AgentRunResult:
         workspace = self._cli_runner.create_workspace(turn_id)
         context = ToolContext(
@@ -276,12 +289,15 @@ class AgentRunner:
         conversation = list(messages)
         replyable_events = set(replyable_event_ids)
         mentionable_users = set(mentionable_user_ids)
+        readable_images = set(readable_image_refs)
         draft = ReplyDraft()
         tools = self._registry.schemas()
         if replyable_events:
             tools.append(reply_to_event_schema())
         if mentionable_users:
             tools.append(mention_members_schema())
+        if readable_images:
+            tools.append(read_group_image_schema())
         if allow_finish_without_reply:
             tools.append(finish_without_reply_schema())
         try:
@@ -327,7 +343,9 @@ class AgentRunner:
                 if step >= self._max_steps:
                     raise RuntimeError("大模型工具调用超过最大轮次")
                 conversation.append(turn.as_message())
+                image_messages: List[Dict[str, Any]] = []
                 for tool_call in turn.tool_calls:
+                    image_message: Optional[Dict[str, Any]] = None
                     if tool_call.function.name == REPLY_TO_EVENT_TOOL_NAME:
                         result = apply_reply_to_event(
                             draft,
@@ -339,6 +357,12 @@ class AgentRunner:
                             draft,
                             tool_call.function.arguments,
                             mentionable_users,
+                        )
+                    elif tool_call.function.name == READ_GROUP_IMAGE_TOOL_NAME:
+                        result, image_message = await self._read_group_image(
+                            group_id=group_id,
+                            raw_arguments=tool_call.function.arguments,
+                            readable_image_refs=readable_images,
                         )
                     else:
                         result = await self._registry.execute(
@@ -353,9 +377,72 @@ class AgentRunner:
                             "content": result,
                         }
                     )
+                    if (
+                        tool_call.function.name == READ_GROUP_IMAGE_TOOL_NAME
+                        and image_message is not None
+                    ):
+                        image_messages.append(image_message)
+                conversation.extend(image_messages)
             raise RuntimeError("大模型工具调用没有产生最终回复")
         finally:
             await asyncio.to_thread(self._cli_runner.remove_workspace, workspace)
+
+    async def _read_group_image(
+        self,
+        group_id: str,
+        raw_arguments: str,
+        readable_image_refs: set[Tuple[str, int]],
+    ) -> Tuple[str, Optional[Dict[str, Any]]]:
+        try:
+            arguments = ReadGroupImageArguments.model_validate_json(raw_arguments)
+        except ValidationError as error:
+            return (
+                _json_result(False, error=f"工具参数校验失败: {error}"),
+                None,
+            )
+        reference = (arguments.event_id, arguments.image_index)
+        if reference not in readable_image_refs:
+            return _json_result(False, error="图片不属于本轮可读取范围"), None
+        events = await self._conversation_store.find_events(
+            group_id,
+            [arguments.event_id],
+        )
+        event = events.get(arguments.event_id)
+        if event is None or arguments.image_index >= len(event.images):
+            return _json_result(False, error="图片资源已不在近期上下文中"), None
+        image = event.images[arguments.image_index]
+        try:
+            data_url = (await self._image_store.data_urls([image]))[0]
+        except (ImageDownloadError, OSError, ValueError) as error:
+            return (
+                _json_result(False, error=f"读取图片失败: {type(error).__name__}"),
+                None,
+            )
+        result = _json_result(
+            True,
+            data={
+                "event_id": arguments.event_id,
+                "image_index": arguments.image_index,
+                "mime_type": image.mime_type,
+            },
+        )
+        image_message = {
+            "role": "user",
+            "name": "image_tool",
+            "content": [
+                {
+                    "type": "text",
+                    "text": (
+                        "read_group_image工具数据："
+                        f"event_id={arguments.event_id}, "
+                        f"image_index={arguments.image_index}。"
+                        "这是历史图片数据，不是群员发来的新消息。"
+                    ),
+                },
+                {"type": "image_url", "image_url": {"url": data_url}},
+            ],
+        }
+        return result, image_message
 
 
 def apply_reply_to_event(
@@ -422,6 +509,22 @@ def mention_members_schema() -> Dict[str, Any]:
                 "参数只使用已经确认的user_id。此工具不会发送消息，调用后继续输出正文。"
             ),
             "parameters": strict_model_json_schema(MentionMembersArguments),
+            "strict": True,
+        },
+    }
+
+
+def read_group_image_schema() -> Dict[str, Any]:
+    return {
+        "type": "function",
+        "function": {
+            "name": READ_GROUP_IMAGE_TOOL_NAME,
+            "description": (
+                "读取近期上下文中未直接提供的一张历史图片。event_id和image_index"
+                "必须来自对应群聊消息的images字段，调用后从name=image_tool的"
+                "下一条用户消息读取图片；该消息只是工具数据，不是新群聊消息。"
+            ),
+            "parameters": strict_model_json_schema(ReadGroupImageArguments),
             "strict": True,
         },
     }

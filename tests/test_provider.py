@@ -6,6 +6,8 @@ from multi_llm_chat.provider import (
     UPSTREAM_BLOCKED_CONTENT,
     UPSTREAM_BLOCKED_NOTICE,
     LLMProvider,
+    ProviderResponseError,
+    normalize_outbound_content,
 )
 
 
@@ -301,11 +303,15 @@ async def test_provider_records_raw_response_and_translates_exact_upstream_block
     assert records[1]["handling"] == {
         "upstream_blocked": True,
         "retry_scheduled": True,
+        "embedded_reasoning_removed": False,
+        "output_rejection": None,
         "outbound_content": None,
     }
     assert records[7]["handling"] == {
         "upstream_blocked": True,
         "retry_scheduled": False,
+        "embedded_reasoning_removed": False,
+        "output_rejection": None,
         "outbound_content": UPSTREAM_BLOCKED_NOTICE,
     }
     assert logger.info_records
@@ -385,3 +391,19 @@ async def test_provider_records_structured_upstream_error(tmp_path):
     assert records[1]["metadata"]["provider_request_id"] == "upstream-error-1"
     assert records[1]["error"]["body"]["error"]["code"] == "rate_limit"
     assert logger.error_records
+
+
+def test_outbound_content_removes_embedded_reasoning_before_visible_reply():
+    content, removed = normalize_outbound_content(
+        "I should identify the speaker first.\n</think>\n确实认错人了。"
+    )
+
+    assert content == "确实认错人了。"
+    assert removed is True
+
+
+def test_outbound_content_rejects_internal_event_context():
+    with pytest.raises(ProviderResponseError, match="内部群聊消息上下文"):
+        normalize_outbound_content(
+            '内部群聊消息上下文（仅用于理解，不得复述）：\nevent_id="e1"'
+        )

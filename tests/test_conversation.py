@@ -3,8 +3,8 @@ from datetime import datetime, timedelta, timezone
 import pytest
 from multi_llm_chat.conversation import (
     ConversationStore,
+    event_context_for_model,
     event_message_for_model,
-    event_metadata_for_model,
     summary_to_text,
 )
 from multi_llm_chat.models import ChatEvent, ConversationSummary
@@ -67,28 +67,29 @@ async def test_compression_preserves_events_that_arrived_after_covered_range(tmp
     assert "午饭" in summary_to_text(state.rolling_summary)
 
 
-def test_model_messages_keep_real_roles_time_and_optional_id():
+def test_model_messages_keep_event_context_adjacent_to_each_body():
     user_event = event("user", 3).model_copy(update={"platform_message_id": "123"})
     assistant_event = event("bot", 4, role="assistant")
-    user_metadata = event_metadata_for_model(
+    user_context = event_context_for_model(
         user_event,
         display_name="小明",
         append_user_id=True,
     )
-    user_message = event_message_for_model(user_event)
-    assistant_metadata = event_metadata_for_model(assistant_event)
-    assistant_message = event_message_for_model(assistant_event)
+    user_message = event_message_for_model(user_event, user_context)
+    assistant_context = event_context_for_model(assistant_event)
+    assistant_message = event_message_for_model(assistant_event, assistant_context)
 
-    assert user_metadata["role"] == "user"
-    assert user_metadata["sent_at"] == "2026-08-22T20:03:00+08:00"
-    assert user_metadata["sender"] == "小明 [user_id=200]"
-    assert user_metadata["reply_available"] is True
     assert user_message["role"] == "user"
     assert user_message["name"] == "qq_200"
-    assert user_message["content"] == "消息 user"
-    assert assistant_metadata["role"] == "assistant"
-    assert assistant_metadata["source"] == "llm"
-    assert assistant_metadata["source_event_id"] is None
-    assert assistant_metadata["reply_available"] is False
+    assert 'event_id="user"' in user_message["content"]
+    assert 'sender="小明 [user_id=200]"' in user_message["content"]
+    assert 'user_id="200"' in user_message["content"]
+    assert 'sent_at="2026-08-22T20:03:00+08:00"' in user_message["content"]
+    assert "reply_available=true" in user_message["content"]
+    assert user_message["content"].endswith("消息正文：\n消息 user")
     assert assistant_message["role"] == "assistant"
-    assert assistant_message["content"] == "消息 bot"
+    assert 'sender="小P"' in assistant_message["content"]
+    assert 'source="llm"' in assistant_message["content"]
+    assert "source_event_id=null" in assistant_message["content"]
+    assert "reply_available=false" in assistant_message["content"]
+    assert assistant_message["content"].endswith("消息正文：\n消息 bot")

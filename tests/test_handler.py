@@ -5,6 +5,7 @@ from types import SimpleNamespace
 
 import nonebot
 import pytest
+from multi_llm_chat.context import ContextBuildResult
 from multi_llm_chat.models import ChatEvent, ConversationState, ImageResource
 from multi_llm_chat.reply_tracker import OutgoingReplyTracker
 from multi_llm_chat.tools import AgentRunResult
@@ -321,7 +322,10 @@ async def test_passive_reply_builds_context_and_runs_agent_once(monkeypatch) -> 
     class FakeContextBuilder:
         async def build(self, *args, **kwargs):
             context_calls.append((args, kwargs))
-            return [{"role": "user", "content": trigger.content}]
+            return ContextBuildResult(
+                messages=[{"role": "user", "content": trigger.content}],
+                readable_image_refs=(("older-image", 0),),
+            )
 
     class FakeAgentRunner:
         async def run(self, **kwargs):
@@ -382,6 +386,7 @@ async def test_passive_reply_builds_context_and_runs_agent_once(monkeypatch) -> 
     assert agent_calls[0]["allow_finish_without_reply"] is True
     assert agent_calls[0]["replyable_event_ids"] == [trigger.event_id]
     assert agent_calls[0]["mentionable_user_ids"] == ["10001", "2997592724"]
+    assert agent_calls[0]["readable_image_refs"] == (("older-image", 0),)
     expected_message = Message(
         [
             MessageSegment.reply(123),

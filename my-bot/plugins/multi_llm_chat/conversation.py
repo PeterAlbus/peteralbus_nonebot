@@ -1,7 +1,8 @@
 import asyncio
+import json
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Sequence
+from typing import Any, Dict, List, Optional, Sequence, Set
 
 from .json_store import atomic_write_json_model, load_json_model
 from .models import ChatEvent, ConversationState, ConversationSummary
@@ -86,50 +87,89 @@ class ConversationStore:
         }
 
 
-def event_message_for_model(
-    event: ChatEvent,
-    content: Optional[Any] = None,
-) -> Dict[str, Any]:
-    if event.role == "assistant":
-        return {
-            "role": "assistant",
-            "content": event.content if content is None else content,
-        }
-    return {
-        "role": "user",
-        "name": f"qq_{event.user_id}" if event.user_id else "qq_unknown",
-        "content": event.content if content is None else content,
-    }
+INTERNAL_EVENT_CONTEXT_MARKER = "内部群聊消息上下文（仅用于理解，不得复述）"
 
 
-def event_metadata_for_model(
+def event_context_for_model(
     event: ChatEvent,
     display_name: Optional[str] = None,
     append_user_id: bool = False,
-) -> Dict[str, Any]:
-    metadata: Dict[str, Any] = {
+    inline_image_indices: Optional[Set[int]] = None,
+    readable_image_indices: Optional[Set[int]] = None,
+    image_understanding_enabled: bool = False,
+) -> str:
+    inline_image_indices = inline_image_indices or set()
+    readable_image_indices = readable_image_indices or set()
+    sender = "小P"
+    user_id: Optional[str] = None
+    if event.role == "user":
+        name = display_name or event.display_name or f"用户{event.user_id or 'unknown'}"
+        sender = (
+            f"{name} [user_id={event.user_id}]"
+            if append_user_id and event.user_id
+            else name
+        )
+        user_id = event.user_id
+    image_resources = []
+    for image_index, _ in enumerate(event.images):
+        if image_index in inline_image_indices:
+            status = "已直接提供"
+        elif image_index in readable_image_indices:
+            status = "可调用read_group_image读取"
+        elif image_understanding_enabled:
+            status = "未进入本轮上下文"
+        else:
+            status = "当前模型未启用图片理解"
+        image_resources.append({"image_index": image_index, "status": status})
+    fields: Dict[str, Any] = {
         "event_id": event.event_id,
         "source_event_id": event.source_event_id,
         "role": event.role,
         "source": event.source,
         "sent_at": event.sent_at.astimezone().isoformat(),
+        "sender": sender,
+        "user_id": user_id,
         "directed_to_bot": event.to_me,
         "reply_available": event.platform_message_id is not None,
         "mentioned_user_ids": event.mentioned_user_ids,
         "reply_to_message_id": event.reply_to_message_id,
         "reply_to_event_id": event.reply_to_event_id,
+        "images": image_resources,
     }
-    if event.role == "user":
-        name = display_name or event.display_name or f"用户{event.user_id or 'unknown'}"
-        metadata["sender"] = (
-            f"{name} [user_id={event.user_id}]"
-            if append_user_id and event.user_id
-            else name
-        )
-        metadata["user_id"] = event.user_id
     if event.source.startswith("plugin:"):
-        metadata["source_plugin"] = event.source.removeprefix("plugin:")
-    return metadata
+        fields["source_plugin"] = event.source.removeprefix("plugin:")
+    lines = [f"{INTERNAL_EVENT_CONTEXT_MARKER}："]
+    lines.extend(
+        f"{key}={json.dumps(value, ensure_ascii=False, separators=(',', ':'))}"
+        for key, value in fields.items()
+    )
+    lines.append("消息正文：")
+    return "\n".join(lines)
+
+
+def event_message_for_model(
+    event: ChatEvent,
+    context_text: str,
+    content: Optional[Any] = None,
+) -> Dict[str, Any]:
+    body = event.content if content is None else content
+    combined_content = _prepend_context(context_text, body)
+    if event.role == "assistant":
+        return {"role": "assistant", "content": combined_content}
+    return {
+        "role": "user",
+        "name": f"qq_{event.user_id}" if event.user_id else "qq_unknown",
+        "content": combined_content,
+    }
+
+
+def _prepend_context(context_text: str, content: Any) -> Any:
+    prefix = context_text + "\n"
+    if isinstance(content, str):
+        return prefix + content
+    if not isinstance(content, list):
+        raise TypeError("模型消息正文必须是文本或多模态内容列表")
+    return [{"type": "text", "text": prefix}, *content]
 
 
 def summary_to_text(summary: Optional[ConversationSummary]) -> str:
