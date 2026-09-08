@@ -3,6 +3,7 @@ from types import SimpleNamespace
 
 import pytest
 from multi_llm_chat.provider import (
+    CHAT_REPLY_MAX_CHARS,
     UPSTREAM_BLOCKED_CONTENT,
     UPSTREAM_BLOCKED_NOTICE,
     LLMProvider,
@@ -344,7 +345,7 @@ async def test_provider_returns_first_non_blocked_retry(tmp_path):
 async def test_provider_only_translates_exact_upstream_block_content(tmp_path):
     provider = provider_for_completion(tmp_path)
     content = f" {UPSTREAM_BLOCKED_CONTENT} "
-    client = fake_client(FakeRawResponse(content, finish_reason="content_filter"))
+    client = fake_client(FakeRawResponse(content))
     provider._client_for = lambda provider_config: client
 
     turn = await provider.complete(
@@ -356,6 +357,65 @@ async def test_provider_only_translates_exact_upstream_block_content(tmp_path):
 
     assert turn.content == UPSTREAM_BLOCKED_CONTENT
     assert client.chat.completions.with_raw_response.call_count == 1
+
+
+@pytest.mark.asyncio
+async def test_provider_rejects_truncated_chat_reply(tmp_path):
+    provider = provider_for_completion(tmp_path)
+    provider._client_for = lambda provider_config: fake_client(
+        FakeRawResponse("未完成的模型输出", finish_reason="length")
+    )
+
+    with pytest.raises(ProviderResponseError, match="finish_reason=length"):
+        await provider.complete(
+            messages=[{"role": "user", "content": "测试"}],
+            request_type="passive_chat_agent",
+            turn_id="turn-truncated",
+            step=0,
+        )
+
+    records = [
+        json.loads(line)
+        for line in next((tmp_path / "logs").glob("llm-requests-*.jsonl"))
+        .read_text(encoding="utf-8")
+        .splitlines()
+    ]
+    assert records[-1]["handling"]["outbound_content"] is None
+    assert (
+        records[-1]["handling"]["output_rejection"]
+        == "模型响应未正常结束: finish_reason=length"
+    )
+
+
+@pytest.mark.asyncio
+async def test_provider_accepts_chat_reply_at_character_limit(tmp_path):
+    provider = provider_for_completion(tmp_path)
+    content = "字" * CHAT_REPLY_MAX_CHARS
+    provider._client_for = lambda provider_config: fake_client(FakeRawResponse(content))
+
+    turn = await provider.complete(
+        messages=[{"role": "user", "content": "测试"}],
+        request_type="direct_chat_agent",
+        turn_id="turn-at-limit",
+        step=0,
+    )
+
+    assert turn.content == content
+
+
+@pytest.mark.asyncio
+async def test_provider_rejects_chat_reply_above_character_limit(tmp_path):
+    provider = provider_for_completion(tmp_path)
+    content = "字" * (CHAT_REPLY_MAX_CHARS + 1)
+    provider._client_for = lambda provider_config: fake_client(FakeRawResponse(content))
+
+    with pytest.raises(ProviderResponseError, match="超过 4000 字符上限"):
+        await provider.complete(
+            messages=[{"role": "user", "content": "测试"}],
+            request_type="direct_chat_agent",
+            turn_id="turn-too-long",
+            step=0,
+        )
 
 
 @pytest.mark.asyncio

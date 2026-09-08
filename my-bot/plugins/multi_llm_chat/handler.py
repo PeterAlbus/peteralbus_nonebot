@@ -122,7 +122,6 @@ cli_runner = DockerCliRunner(
 tool_registry = build_default_tool_registry(
     roster_service=roster_service,
     memory_store=memory_store,
-    cli_runner=cli_runner,
     tool_timeout_seconds=config.llm_chat_tool_timeout_seconds,
     output_max_chars=config.llm_chat_tool_output_max_chars,
 )

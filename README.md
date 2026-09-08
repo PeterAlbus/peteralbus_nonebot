@@ -92,7 +92,6 @@ OneBot V11 是群身份的基础数据源。插件使用以下 API：
 - 列出当前群成员。
 - 刷新并获取指定群成员。
 - 搜索当前群记忆。
-- 在隔离容器内执行 CLI 命令。
 - 通过 `reply_to_event` 设置最终消息要引用的近期事件。
 - 通过 `mention_members` 添加最终消息要 `@` 的当前群成员。
 - 通过 `read_group_image` 按需读取本轮近期上下文中未直接传入的图片。
@@ -137,18 +136,6 @@ def register_tools(registry: ToolRegistry) -> None:
 
 `ToolContext` 提供当前 `group_id`、触发用户、OneBot `bot` 和本轮隔离工作目录。自定义 Python 工具运行在机器人进程中，应只注册可信的项目代码。
 
-## CLI 隔离
-
-先构建工具镜像：
-
-```bash
-docker build -t peteralbus-nonebot-tool-runner:latest tool_runner
-```
-
-每个模型轮次会创建一次性工作目录，并通过 Docker 启动无网络容器。容器采用只读根文件系统、非 root 用户、内存/CPU/PID 限制、移除 Linux capabilities，并且只把本轮工作目录挂载为可写。项目目录、`.env`、宿主网络和 Docker socket 都不会挂载。
-
-`rm`、`rmdir`、`shred`、关机、挂载、进程终止、文件系统格式化以及 `git clean/reset` 等高危命令会在执行前被拒绝。容器超时后会被终止，本轮工作目录随后删除。
-
 ## 原始请求日志
 
 模型 raw request 不写入普通应用日志，而是按天追加到 `LLM_CHAT_RAW_REQUEST_LOG_DIR` 下的 JSONL 文件。文件权限为 `0600`，目录权限为 `0700`。每天定时删除超过 `LLM_CHAT_RAW_REQUEST_RETENTION_DAYS` 的文件。
@@ -157,7 +144,7 @@ docker build -t peteralbus-nonebot-tool-runner:latest tool_runner
 
 普通日志只记录 request ID、turn ID、请求类型、模型、耗时、消息数、响应长度和工具调用数，不记录完整提示词或完整记忆内容。
 
-模型响应正文中携带的完整 `</think>` 前缀会在发送前剥离；无法完整分离的思考内容或内部群聊消息上下文会被拒绝，不会发送到群聊。原始响应及处理结果仍保留在 raw request JSONL 中用于排查。
+群聊正文只有在模型以 `finish_reason=stop` 正常结束且不超过 4000 字符时才允许发送。模型响应正文中携带的完整 `</think>` 前缀会在发送前剥离；被截断、过长、无法完整分离思考内容或包含内部群聊消息上下文的响应会被拒绝，不会发送到群聊。原始响应及处理结果仍保留在 raw request JSONL 中用于排查。
 
 ## 每日群聊日报
 
@@ -176,4 +163,4 @@ pip install -e ".[dev]"
 python -m pytest -q
 ```
 
-测试覆盖 JSON 原子状态、自包含群聊事件上下文、单图直传与历史图片读取、压缩并发保留、动态多称呼、记忆过期与上限、OneBot 身份同步、单次被动参与决策、跨插件回复判定、结构化引用与 `@` 回复、模型输出边界、严格工具参数、工具循环、CLI 命令约束、日报来源解析与发送约束，以及 raw request 日志清理。
+测试覆盖 JSON 原子状态、自包含群聊事件上下文、单图直传与历史图片读取、压缩并发保留、动态多称呼、记忆过期与上限、OneBot 身份同步、单次被动参与决策、跨插件回复判定、结构化引用与 `@` 回复、模型输出边界、严格工具参数、工具循环、日报来源解析与发送约束，以及 raw request 日志清理。

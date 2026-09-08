@@ -43,11 +43,6 @@ class MemorySearchArguments(ToolArguments):
     query: str = Field(min_length=1, max_length=100)
 
 
-class CliArguments(ToolArguments):
-    command: str = Field(min_length=1, max_length=4000)
-    timeout_seconds: Optional[int] = Field(default=None, ge=1, le=120)
-
-
 SkipReplyReason = Literal[
     "addressed_to_others",
     "already_answered",
@@ -548,7 +543,6 @@ def finish_without_reply_schema() -> Dict[str, Any]:
 def build_default_tool_registry(
     roster_service: GroupRosterService,
     memory_store: GroupMemoryStore,
-    cli_runner: DockerCliRunner,
     tool_timeout_seconds: int,
     output_max_chars: int,
 ) -> ToolRegistry:
@@ -620,21 +614,6 @@ def build_default_tool_registry(
                 )
         return matches[:20]
 
-    async def run_cli(context: ToolContext, arguments: BaseModel) -> Any:
-        cli_args = CliArguments.model_validate(arguments.model_dump())
-        result = await cli_runner.run(
-            cli_args.command,
-            context.workspace,
-            timeout_seconds=cli_args.timeout_seconds,
-        )
-        return {
-            "exit_code": result.exit_code,
-            "stdout": result.stdout,
-            "stderr": result.stderr,
-            "timed_out": result.timed_out,
-            "truncated": result.truncated,
-        }
-
     for definition in (
         ToolDefinition(
             name="get_current_group_info",
@@ -663,15 +642,6 @@ def build_default_tool_registry(
             arguments_model=MemorySearchArguments,
             executor=search_memory,
             timeout_seconds=tool_timeout_seconds,
-        ),
-        ToolDefinition(
-            name="run_cli",
-            description=(
-                "在隔离、无网络、一次性的 Linux 工作区中执行 shell、Python 或常用 CLI。"
-            ),
-            arguments_model=CliArguments,
-            executor=run_cli,
-            timeout_seconds=max(tool_timeout_seconds, 120),
         ),
     ):
         registry.register(definition)

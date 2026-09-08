@@ -22,6 +22,7 @@ UPSTREAM_BLOCKED_CONTENT = (
 )
 UPSTREAM_BLOCKED_NOTICE = "本次请求被上游屏蔽。"
 UPSTREAM_BLOCK_MAX_RETRIES = 3
+CHAT_REPLY_MAX_CHARS = 4000
 
 
 class ProviderConfigurationError(RuntimeError):
@@ -249,6 +250,7 @@ class LLMProvider:
         choice = result.choices[0]
         message = choice.message
         raw_content = message.content or ""
+        finish_reason = str(choice.finish_reason or "")
         upstream_blocked = raw_content == UPSTREAM_BLOCKED_CONTENT
         retry_scheduled = upstream_blocked and attempt < max_attempts
         embedded_reasoning_removed = False
@@ -260,6 +262,8 @@ class LLMProvider:
                 content, embedded_reasoning_removed = normalize_outbound_content(
                     raw_content
                 )
+                if request_type.endswith("_chat_agent") and not message.tool_calls:
+                    validate_chat_outbound_content(content, finish_reason)
             except ProviderResponseError as error:
                 content = ""
                 output_rejection = str(error)
@@ -284,7 +288,6 @@ class LLMProvider:
         )
         status_code = int(getattr(raw_response, "status_code", 0) or 0)
         retries_taken = int(getattr(raw_response, "retries_taken", 0) or 0)
-        finish_reason = str(choice.finish_reason or "")
         await append_response_async(
             directory=self._raw_request_log_dir,
             request_id=request_id,
@@ -342,7 +345,7 @@ class LLMProvider:
         )
         if output_rejection:
             self._logger.error(  # noqa: PLE1205 - Loguru uses brace formatting.
-                "拒绝使用包含内部内容的模型响应: request_id={}, turn_id={}, "
+                "拒绝使用不符合输出约束的模型响应: request_id={}, turn_id={}, "
                 "step={}, request_type={}, model={}, reason={}",
                 request_id,
                 common_metadata["turn_id"],
@@ -537,3 +540,13 @@ def normalize_outbound_content(raw_content: str) -> tuple[str, bool]:
     if INTERNAL_EVENT_CONTEXT_MARKER in content:
         raise ProviderResponseError("模型响应包含内部群聊消息上下文")
     return content, embedded_reasoning_removed
+
+
+def validate_chat_outbound_content(content: str, finish_reason: str) -> None:
+    if finish_reason != "stop":
+        reason = finish_reason or "missing"
+        raise ProviderResponseError(f"模型响应未正常结束: finish_reason={reason}")
+    if len(content) > CHAT_REPLY_MAX_CHARS:
+        raise ProviderResponseError(
+            f"模型回复超过 {CHAT_REPLY_MAX_CHARS} 字符上限: content_chars={len(content)}"
+        )

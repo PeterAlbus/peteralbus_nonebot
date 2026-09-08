@@ -20,6 +20,7 @@ from multi_llm_chat.tools import (
     ToolArguments,
     ToolDefinition,
     ToolRegistry,
+    build_default_tool_registry,
     strict_model_json_schema,
 )
 
@@ -477,3 +478,24 @@ def test_strict_schema_inlines_models_and_removes_unsupported_constraints():
     assert "$ref" not in schema_text
     assert "minLength" not in schema_text
     assert "maxItems" not in schema_text
+
+
+def test_default_tool_registry_does_not_expose_run_cli():
+    registry = build_default_tool_registry(
+        roster_service=object(),
+        memory_store=object(),
+        tool_timeout_seconds=10,
+        output_max_chars=2000,
+    )
+
+    tool_names = {
+        tool["function"]["name"]
+        for tool in registry.schemas()
+        if tool["type"] == "function"
+    }
+    assert tool_names == {
+        "get_current_group_info",
+        "list_current_group_members",
+        "get_current_group_member",
+        "search_group_memory",
+    }
