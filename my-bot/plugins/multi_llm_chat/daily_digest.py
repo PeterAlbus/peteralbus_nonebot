@@ -597,6 +597,8 @@ class DailyDigestService:
             "target_total_chars": limits.target_chars,
             "requirements": [
                 "按重要性从高到低排列，只选择确实值得今天知道的条目",
+                "max_items 是最多可选择的数量，不是必须凑满；内容不足时应当少选或不选",
+                "每个 item_id 最多选择一次，不得重复选择",
                 "AI 最多一条；没有重要更新时不要选择 AI 条目",
                 "游戏优先版本、维护、赛季、重要活动和重大赛事",
                 "政策只选择对普通上班族有明确实际影响的内容",
@@ -956,10 +958,10 @@ def validate_selection(
     kept: list[SelectedDigestItem] = []
     for selected in selection.items:
         if selected.item_id in seen:
-            raise ValueError(f"日报重复选择 item_id: {selected.item_id}")
+            continue
         candidate = candidate_map.get(selected.item_id)
         if candidate is None:
-            raise ValueError(f"日报选择了不存在的 item_id: {selected.item_id}")
+            continue
         seen.add(selected.item_id)
         if counts[candidate.category] >= category_limits[candidate.category]:
             continue

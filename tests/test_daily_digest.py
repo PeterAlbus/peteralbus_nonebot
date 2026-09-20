@@ -256,6 +256,21 @@ def test_selection_enforces_one_ai_item_limit() -> None:
     ]
 
 
+def test_selection_ignores_unknown_and_duplicate_item_ids() -> None:
+    candidates = [make_item("game-1", "game")]
+    selection = DigestSelection(
+        items=[
+            SelectedDigestItem(item_id="missing", text="不存在的候选"),
+            SelectedDigestItem(item_id="game-1", text="第一次选择"),
+            SelectedDigestItem(item_id="game-1", text="重复选择"),
+        ]
+    )
+
+    assert validate_selection(selection, candidates, DailyDigestLimits()) == [
+        selection.items[1]
+    ]
+
+
 @pytest.mark.asyncio
 async def test_llm_selects_from_candidates_without_builtin_tools() -> None:
     calls = []
@@ -290,6 +305,12 @@ async def test_llm_selects_from_candidates_without_builtin_tools() -> None:
     assert calls[0]["allow_builtin_tools"] is False
     assert calls[0]["response_format"] == {"type": "json_object"}
     assert "tools" not in calls[0]
+    prompt = json.loads(calls[0]["messages"][1]["content"])
+    assert (
+        "max_items 是最多可选择的数量，不是必须凑满；内容不足时应当少选或不选"
+        in prompt["requirements"]
+    )
+    assert "每个 item_id 最多选择一次，不得重复选择" in prompt["requirements"]
 
 
 def test_render_uses_fixed_title_and_direct_source() -> None:
