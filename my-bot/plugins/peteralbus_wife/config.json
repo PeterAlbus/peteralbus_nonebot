@@ -1,8 +1,7 @@
 {
   "log": true,
   "dir_rule": {
-    "rule": "Bd_Atitle_Pindex",
-    "base_dir": "/home/PeterAlbus/napcat/resources/jm"
+    "rule": "Bd_Atitle_Pindex"
   },
   "download": {
     "cache": true,

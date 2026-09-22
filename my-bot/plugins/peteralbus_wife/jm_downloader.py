@@ -11,8 +11,7 @@ from nonebot.adapters.onebot.v11 import GROUP, Bot, GroupMessageEvent, Message
 from nonebot.log import logger
 from nonebot.params import CommandArg
 
-from .config import Config
-
+from .config import Config, resolve_plugin_path
 
 config = get_plugin_config(Config)
 
@@ -31,10 +30,9 @@ _download_semaphore = asyncio.Semaphore(
 
 
 def _resolve_option_path() -> Path:
-    option_path = Path(config.peteralbus_wife_jm_option_path).expanduser()
-    if not option_path.is_absolute():
-        option_path = Path(__file__).parent / option_path
-    return option_path.resolve()
+    return resolve_plugin_path(
+        config.peteralbus_wife_jm_option_path, "PETERALBUS_WIFE_JM_OPTION_PATH"
+    )
 
 
 def _is_within(path: Path, parent: Path) -> bool:
@@ -46,20 +44,14 @@ def _is_within(path: Path, parent: Path) -> bool:
 
 
 def _prepare_job(jm_code: str) -> Tuple[JmOption, Path, Path]:
+    work_root = resolve_plugin_path(
+        config.peteralbus_wife_jm_work_dir, "PETERALBUS_WIFE_JM_WORK_DIR"
+    )
     option_path = _resolve_option_path()
     if not option_path.is_file():
         raise FileNotFoundError(f"JM 配置文件不存在: {option_path}")
 
     option = create_option_by_file(str(option_path))
-    configured_work_dir = config.peteralbus_wife_jm_work_dir.strip()
-    if configured_work_dir:
-        work_root = Path(configured_work_dir).expanduser()
-        if not work_root.is_absolute():
-            work_root = Path(option.dir_rule.base_dir) / work_root
-    else:
-        work_root = Path(option.dir_rule.base_dir) / ".nonebot_tasks"
-
-    work_root = work_root.resolve()
     work_root.mkdir(parents=True, exist_ok=True)
     job_dir = (work_root / f"jm-{jm_code}-{uuid4().hex}").resolve()
     if not _is_within(job_dir, work_root):
@@ -98,16 +90,13 @@ def _cleanup_stale_jobs(work_root: Path) -> None:
 
 def _select_pdf_path(result, job_dir: Path) -> Path:
     pdf_paths = [
-        Path(path).resolve()
-        for path in result.manifest.get_export_filepath_list("pdf")
+        Path(path).resolve() for path in result.manifest.get_export_filepath_list("pdf")
     ]
     valid_paths = [
         path for path in pdf_paths if path.is_file() and _is_within(path, job_dir)
     ]
     if len(valid_paths) != 1:
-        raise RuntimeError(
-            f"预期生成 1 个 PDF，实际找到 {len(valid_paths)} 个"
-        )
+        raise RuntimeError(f"预期生成 1 个 PDF，实际找到 {len(valid_paths)} 个")
     return valid_paths[0]
 
 
@@ -128,9 +117,7 @@ async def _send_status(message: str) -> None:
 def _is_allowed(event: GroupMessageEvent) -> bool:
     allowed_groups = set(config.peteralbus_wife_jm_allowed_groups)
     allowed_users = set(config.peteralbus_wife_jm_allowed_users)
-    return (
-        not allowed_groups or str(event.group_id) in allowed_groups
-    ) and (
+    return (not allowed_groups or str(event.group_id) in allowed_groups) and (
         not allowed_users or str(event.user_id) in allowed_users
     )
 
@@ -215,9 +202,7 @@ async def handle_jm_download(
     finally:
         _active_jobs.discard(jm_code)
         if job_dir is not None and work_root is not None:
-            retention_hours = max(
-                0, config.peteralbus_wife_jm_failed_retention_hours
-            )
+            retention_hours = max(0, config.peteralbus_wife_jm_failed_retention_hours)
             if upload_succeeded or retention_hours == 0:
                 try:
                     await asyncio.to_thread(_cleanup_job_dir, job_dir, work_root)

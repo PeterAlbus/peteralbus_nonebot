@@ -3,12 +3,24 @@ from typing import List
 
 from pydantic import BaseModel, Field
 
+PLUGIN_DIR = Path(__file__).resolve().parent
+
+
+def resolve_plugin_path(configured: str, setting_name: str) -> Path:
+    value = configured.strip()
+    if not value:
+        raise ValueError(f"请在 .env 中配置 {setting_name}")
+    path = Path(value).expanduser()
+    if not path.is_absolute():
+        path = PLUGIN_DIR / path
+    return path.resolve()
+
 
 class Config(BaseModel):
     """peteralbus-wife 插件配置。"""
 
-    peteralbus_wife_res: str = "/home/PeterAlbus/napcat/resources/peteralbus_wife"
-    peteralbus_wife_jm_option_path: str = str(Path(__file__).with_name("config.json"))
+    peteralbus_wife_res: str = ""
+    peteralbus_wife_jm_option_path: str = "config.json"
     peteralbus_wife_jm_work_dir: str = ""
     peteralbus_wife_jm_max_concurrency: int = 1
     peteralbus_wife_jm_download_timeout: int = 1800

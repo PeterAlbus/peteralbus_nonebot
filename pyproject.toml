@@ -14,9 +14,14 @@ dependencies = [
     "feedparser>=6,<7",
     "img2pdf>=0.5.1,<0.7",
     "jmcomic==2.7.4",
+    "nb-cli==1.4.2",
     "nonebot2[fastapi]>=2.4,<3",
     "nonebot-adapter-onebot>=2.4,<3",
+    "nonebot-plugin-animeres==1.0.5",
     "nonebot-plugin-apscheduler>=0.5,<1",
+    "nonebot-plugin-fakemsg==0.1.9",
+    "nonebot-plugin-status==0.9.0",
+    "nonebot-plugin-whateat-pic==1.5.9",
     "openai>=1.0,<3",
     "pydantic>=2.7,<3"
 ]

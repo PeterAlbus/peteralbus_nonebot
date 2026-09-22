@@ -6,15 +6,21 @@
 
 项目要求 Python 3.9 或更高版本。
 
+macOS 部署使用 Miniconda 的 Python 3.12 环境和 `start-macos.sh`。从安装依赖、迁移资源到配置 NapCat、设置登录自启，按 [macOS 部署文档](docs/deploy-macos.md) 操作。`requirements-macos.lock` 固定了该环境的运行和测试依赖。
+
 ```bash
 python -m venv .venv
 source .venv/bin/activate
-pip install -e .
+python -m pip install -e .
 cp .env.example .env
 nb run
 ```
 
-在 `.env` 中至少配置群白名单、当前模型对应的 API Key，以及 OneBot 连接所需配置。模型与提供商映射位于 `my-bot/plugins/multi_llm_chat/model_routes.json`。
+启动前填写 `.env` 中的群白名单、当前模型对应的 API Key、OneBot 连接配置，以及 `PETERALBUS_WIFE_RES`、`PETERALBUS_WIFE_JM_WORK_DIR`、`WHATPIC_RES_PATH` 三个资源/工作目录。模型与提供商映射位于 `my-bot/plugins/multi_llm_chat/model_routes.json`。
+
+`peteralbus_wife` 的路径支持绝对路径和 `~`，相对路径以该插件目录为基准。JM 的任务根目录由 `PETERALBUS_WIFE_JM_WORK_DIR` 指定，`config.json` 维护下载规则。图片资源需要事先准备；JM 工作目录会自动创建。
+
+`start.sh` 用于已有 Linux 环境；`start-macos.sh` 从 `.env.macos` 读取 Miniconda 路径，在指定 Conda 环境中前台启动，不启用自动重载。`.env.macos` 从 `.env.macos.example` 复制，具体配置与常驻管理见部署文档。
 
 ## 对话架构
 

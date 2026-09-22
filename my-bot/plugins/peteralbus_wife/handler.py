@@ -1,21 +1,21 @@
-from nonebot import on_command, require
-from nonebot.rule import to_me
-from . import config
-from pathlib import Path
 import random
-from nonebot.log import logger
-from typing import Dict, List, Optional, Tuple, Union
-from datetime import date, datetime
+from typing import Dict, Optional
+
+from nonebot import get_plugin_config, on_command, require
 from nonebot.adapters.onebot.v11 import (
-    GROUP,
-    GROUP_ADMIN,
-    GROUP_OWNER,
     GroupMessageEvent,
-    Message,
     MessageSegment,
 )
+from nonebot.log import logger
+from nonebot.rule import to_me
+
+from .config import Config, resolve_plugin_path
+
 require("nonebot_plugin_apscheduler")
-from nonebot_plugin_apscheduler import scheduler  # isort:skip
+from nonebot_plugin_apscheduler import scheduler  # noqa: E402  # isort:skip
+
+config = get_plugin_config(Config)
+
 
 class WifeManager:
     def __init__(self):
@@ -29,65 +29,82 @@ class WifeManager:
             self.user_info[gid] = {}
         self.user_info[gid][uid] = {
             "character_name": character_name,
-            "image_path": image_path
+            "image_path": image_path,
         }
-    
+
     def get_wife(self, gid: str, uid: str) -> Optional[Dict[str, str]]:
         return self.user_info.get(gid, {}).get(uid, None)
-    
+
     def clean(self):
         self.user_info = {}
 
+
 wife_manager = WifeManager()
 
-today_wife = on_command("今日老婆", rule=to_me(), aliases={"老婆"}, priority=10, block=True)
+today_wife = on_command(
+    "今日老婆", rule=to_me(), aliases={"老婆"}, priority=10, block=True
+)
+
 
 def random_wife_pic():
     """
     随机获取一张图片
     """
-    menu_dir = Path("/home/PeterAlbus/napcat/resources/peteralbus_wife")
+    menu_dir = resolve_plugin_path(config.peteralbus_wife_res, "PETERALBUS_WIFE_RES")
     # 获取所有文件夹（角色名）
     character_folders = [folder for folder in menu_dir.iterdir() if folder.is_dir()]
 
     if not character_folders:
         logger.error("没有找到角色文件夹")
         return None, None
-    
+
     # 随机选择一个角色
     random_character_folder = random.choice(character_folders)
     # 获取该角色文件夹内所有图片文件
-    image_files = [file for file in random_character_folder.iterdir() if file.suffix.lower() in ['.jpg', '.jpeg', '.png', '.gif']]
-    
+    image_files = [
+        file
+        for file in random_character_folder.iterdir()
+        if file.suffix.lower() in [".jpg", ".jpeg", ".png", ".gif"]
+    ]
+
     if not image_files:
         logger.error(f"角色 {random_character_folder.name} 中没有图片文件")
         return None, None
-    
+
     # 随机选择一张图片
     random_image = random.choice(image_files)
     return random_character_folder.name, random_image
 
+
 def get_agnes_pic():
-    path_list = [
-        "/home/PeterAlbus/napcat/resources/peteralbus_wife/亚妮艾丝",
-	"/home/PeterAlbus/napcat/resources/peteralbus_wife/亚尔缇娜",
-	"/home/PeterAlbus/napcat/resources/peteralbus_wife/鉴纯夏",
-	"/home/PeterAlbus/napcat/resources/peteralbus_wife/雪之下雪乃",
-	"/home/PeterAlbus/napcat/resources/peteralbus_wife/流萤",
+    resource_dir = resolve_plugin_path(
+        config.peteralbus_wife_res, "PETERALBUS_WIFE_RES"
+    )
+    character_names = [
+        "亚妮艾丝",
+        "亚尔缇娜",
+        "鉴纯夏",
+        "雪之下雪乃",
+        "流萤",
     ]
-    
+
     # 随机选择一个角色
-    random_character_folder = Path(random.choice(path_list))
+    random_character_folder = resource_dir / random.choice(character_names)
     # 获取该角色文件夹内所有图片文件
-    image_files = [file for file in random_character_folder.iterdir() if file.suffix.lower() in ['.jpg', '.jpeg', '.png', '.gif']]
-    
+    image_files = [
+        file
+        for file in random_character_folder.iterdir()
+        if file.suffix.lower() in [".jpg", ".jpeg", ".png", ".gif"]
+    ]
+
     if not image_files:
         logger.error(f"角色 {random_character_folder.name} 中没有图片文件")
         return None, None
-    
+
     # 随机选择一张图片
     random_image = random.choice(image_files)
     return random_character_folder.name, random_image
+
 
 @today_wife.handle()
 async def today_wife_handle(event: GroupMessageEvent):
@@ -110,9 +127,13 @@ async def today_wife_handle(event: GroupMessageEvent):
         await today_wife.finish("寻找老婆出错了...")
     # 发送角色名和图片
     if is_new:
-        message = MessageSegment.text(f"今日老婆：{character_name}!") + MessageSegment.image(image_path)
+        message = MessageSegment.text(
+            f"今日老婆：{character_name}!"
+        ) + MessageSegment.image(image_path)
     else:
-        message = MessageSegment.text(f"今日老婆：{character_name}。") + MessageSegment.image(image_path)
+        message = MessageSegment.text(
+            f"今日老婆：{character_name}。"
+        ) + MessageSegment.image(image_path)
     # 发送图片路径
     await today_wife.finish(message, at_sender=True)
 
