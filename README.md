@@ -18,6 +18,8 @@ nb run
 
 启动前填写 `.env` 中的群白名单、当前模型对应的 API Key、OneBot 连接配置，以及 `PETERALBUS_WIFE_RES`、`PETERALBUS_WIFE_JM_WORK_DIR`、`WHATPIC_RES_PATH` 三个资源/工作目录。模型与提供商映射位于 `my-bot/plugins/multi_llm_chat/model_routes.json`。
 
+模型路由中的 `use_system_proxy` 可控制单个提供商是否使用操作系统代理；MiMo 配置为 `false`，直接连接其 API。其他提供商未设置时保持 HTTP 客户端默认行为。
+
 `peteralbus_wife` 的路径支持绝对路径和 `~`，相对路径以该插件目录为基准。JM 的任务根目录由 `PETERALBUS_WIFE_JM_WORK_DIR` 指定，`config.json` 维护下载规则。图片资源需要事先准备；JM 工作目录会自动创建。
 
 `start.sh` 用于已有 Linux 环境；`start-macos.sh` 从 `.env.macos` 读取 Miniconda 路径，在指定 Conda 环境中前台启动，不启用自动重载。`.env.macos` 从 `.env.macos.example` 复制，具体配置与常驻管理见部署文档。

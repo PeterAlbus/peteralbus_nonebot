@@ -738,6 +738,7 @@ async def clean_expired_raw_request_logs() -> None:
     hour=daily_digest_config.send_time.hour,
     minute=daily_digest_config.send_time.minute,
     timezone=daily_digest_config.timezone,
+    misfire_grace_time=3600,
     max_instances=1,
 )
 async def send_daily_digests() -> None:

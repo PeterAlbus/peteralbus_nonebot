@@ -7,7 +7,7 @@ from time import perf_counter
 from typing import Any
 from uuid import uuid4
 
-from openai import AsyncOpenAI
+from openai import AsyncOpenAI, DefaultAsyncHttpxClient
 
 from .conversation import INTERNAL_EVENT_CONTEXT_MARKER
 from .models import AssistantTurn, FunctionCall, ToolCall
@@ -47,7 +47,7 @@ class LLMProvider:
         self._logger = logger
         self._routes = self._load_routes()
         self._client: AsyncOpenAI | None = None
-        self._client_params: tuple[str, str, int] | None = None
+        self._client_params: tuple[str, str, int, bool] | None = None
 
     def _load_routes(self) -> dict[str, Any]:
         data = json.loads(self._routes_path.read_text(encoding="utf-8"))
@@ -79,16 +79,24 @@ class LLMProvider:
         api_key = str(getattr(self._config, api_key_field, "") or "").strip()
         base_url = _normalize_base_url(str(provider_config.get("base_url", "")))
         timeout = int(self._config.llm_chat_request_timeout)
+        use_system_proxy = provider_config.get("use_system_proxy", True)
+        if not isinstance(use_system_proxy, bool):
+            raise ProviderConfigurationError("use_system_proxy 必须是布尔值")
         if not api_key:
             raise ProviderConfigurationError(f"模型 API 密钥未配置: {api_key_field}")
         if not base_url:
             raise ProviderConfigurationError("模型 base_url 未配置")
-        params = (api_key, base_url, timeout)
+        params = (api_key, base_url, timeout, use_system_proxy)
         if self._client is None or self._client_params != params:
             self._client = AsyncOpenAI(
                 api_key=api_key,
                 base_url=base_url,
                 timeout=timeout,
+                http_client=(
+                    None
+                    if use_system_proxy
+                    else DefaultAsyncHttpxClient(trust_env=False)
+                ),
             )
             self._client_params = params
         return self._client

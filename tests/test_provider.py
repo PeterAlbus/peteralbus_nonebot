@@ -39,6 +39,43 @@ def config():
     )
 
 
+def test_provider_can_bypass_system_proxy_for_direct_api(tmp_path, monkeypatch):
+    routes = {
+        "providers": {
+            "provider": {
+                "base_url": "https://example.com/v1",
+                "api_key_field": "api_key",
+                "supports_tools": True,
+                "use_system_proxy": False,
+            }
+        },
+        "models": {"model": {"provider": "provider"}},
+    }
+    routes_path = tmp_path / "routes.json"
+    routes_path.write_text(json.dumps(routes), encoding="utf-8")
+    provider = LLMProvider(config(), routes_path, tmp_path / "logs", Logger())
+    clients = []
+
+    def fake_openai(**kwargs):
+        client = SimpleNamespace(**kwargs)
+        clients.append(client)
+        return client
+
+    monkeypatch.setattr(
+        "multi_llm_chat.provider.DefaultAsyncHttpxClient",
+        lambda **kwargs: SimpleNamespace(**kwargs),
+    )
+    monkeypatch.setattr("multi_llm_chat.provider.AsyncOpenAI", fake_openai)
+
+    provider._client_for(routes["providers"]["provider"])
+    assert clients[-1].http_client.trust_env is False
+
+    routes["providers"]["provider"]["use_system_proxy"] = True
+    provider._client_for(routes["providers"]["provider"])
+    assert clients[-1].http_client is None
+    assert len(clients) == 2
+
+
 def test_provider_merges_builtin_and_custom_tools_only_for_agent_request(tmp_path):
     routes = {
         "providers": {

@@ -8,6 +8,7 @@
     },
     "xiaomi_mimo": {
       "base_url": "https://api.xiaomimimo.com/v1",
+      "use_system_proxy": false,
       "api_key_field": "llm_chat_xiaomi_mimo_api_key",
       "supports_tools": true,
       "supports_strict_tools": true,

@@ -49,6 +49,7 @@ mkdir -p "$NB_DATA_DIR/peteralbus_wife" \
   "$NB_DATA_DIR/llm_chat_state" \
   "$NB_DATA_DIR/llm_request_logs" \
   "$NB_DATA_DIR/llm_tool_workspaces" \
+  "$NB_DATA_DIR/meme_generator" \
   "$NB_DATA_DIR/service_logs"
 )
 ```
@@ -80,7 +81,7 @@ python -m pytest -q
 
 预期 `pip check` 输出 `No broken requirements found.`，测试全部通过。测试使用模拟消息和临时数据，不启动 QQ 连接。安装遇到错误时先处理安装错误，不继续启动服务。
 
-锁定文件包括 `nb-cli`、本地插件的依赖和以下四个已启用的第三方插件：
+锁定文件包括 `nb-cli`、本地插件的依赖和以下五个已启用的第三方插件：
 
 | 插件 | 固定版本 | 用途 |
 | --- | --- | --- |
@@ -88,6 +89,7 @@ python -m pytest -q
 | `nonebot-plugin-whateat-pic` | 1.5.9 | 今天吃什么、喝什么和图片菜单 |
 | `nonebot-plugin-animeres` | 1.0.5 | 动漫资源搜索 |
 | `nonebot-plugin-fakemsg` | 0.1.9 | 合并转发消息 |
+| `nonebot-plugin-memes` | 0.8.1 | 制作表情包、处理图片和 GIF |
 
 `nb-cli` 固定为 1.4.2；它与吃什么插件可以共同使用锁定的 `rich==13.9.4`。直接修改单个依赖版本后，应重新解析整套依赖并运行测试。运行机器不需要安装 `uv`，安装上述锁定文件使用 pip 即可。
 
@@ -109,10 +111,14 @@ cp .env.example .env
 ```bash
 CONDA_BASE=""
 CONDA_ENV_PATH=""
+export MEME_HOME="/absolute/path/to/napcat/meme_generator"
 ```
 
 - `CONDA_BASE`：填写 `conda info --base` 输出的绝对路径。
 - `CONDA_ENV_PATH`：填写激活 `nonebot` 后 `echo "$CONDA_PREFIX"` 输出的绝对路径。
+- `MEME_HOME`：填入 `meme_generator` 的绝对路径；生成器会在其中保存模板图片、字体、配置和临时文件，不使用默认的 `~/.meme_generator`。
+
+表情包插件还通过 `nonebot-plugin-localstore` 保存管理配置和统计数据库。应将 `.env` 的 `LOCALSTORE_CACHE_DIR`、`LOCALSTORE_DATA_DIR`、`LOCALSTORE_CONFIG_DIR` 分别指向 `$NB_DATA_DIR/cache`、`$NB_DATA_DIR/plugin_data`、`$NB_DATA_DIR/plugin_config` 对应的绝对路径。统计数据库位于 `plugin_data/nonebot_plugin_orm/db.sqlite3`，管理配置位于 `plugin_config/nonebot_plugin_memes/meme_manager.yml`。首次启动会在 `MEME_HOME/resources` 下载字体和表情素材。
 
 此文件由 Bash 读取，保留双引号，填写完整路径。它只负责启动环境；机器人令牌、API Key 和插件配置写入 `.env`。
 
@@ -124,7 +130,7 @@ CONDA_ENV_PATH=""
 
 | 配置项 | 部署时填写 |
 | --- | --- |
-| `DRIVER` | 保持 `~fastapi` |
+| `DRIVER` | `~fastapi+~httpx`，表情包插件需要 httpx 客户端驱动下载图片 |
 | `HOST` | 同机部署保持 `127.0.0.1` |
 | `PORT` | 默认 `2333`，与 NapCat 配置一致 |
 | `ONEBOT_ACCESS_TOKEN` | 与 NapCat 完全一致的访问令牌 |
@@ -149,6 +155,16 @@ CONDA_ENV_PATH=""
 JM 的工作目录由 `PETERALBUS_WIFE_JM_WORK_DIR` 指定。每次下载在其中建立独立任务目录，图片和 PDF 均在该任务目录内生成；`config.json` 用于下载参数和目录命名规则。上传成功后任务目录删除，失败任务按 `PETERALBUS_WIFE_JM_FAILED_RETENTION_HOURS` 的配置保留并在后续任务中清理。
 
 `PETERALBUS_WIFE_JM_ALLOWED_GROUPS` 和 `PETERALBUS_WIFE_JM_ALLOWED_USERS` 默认空列表，分别表示不限制群和用户；配置为非空时，两项限制同时生效。`LLM_CHAT_WHITELIST` 为空则不会处理普通群聊消息。
+
+首次启用表情包插件时，在填写 `.env` 和 `.env.macos` 后、启动 NoneBot 前，初始化统计数据库：
+
+```bash
+cd "$NB_REPO_DIR"
+source .env.macos
+"$CONDA_ENV_PATH/bin/nb" --python "$CONDA_ENV_PATH/bin/python" --no-venv orm upgrade heads
+```
+
+使用 `heads` 是因为已启用插件包含多个迁移分支。未执行这一步时，非交互式 LaunchAgent 会在 ORM 启动检查时报错并退出。后续插件升级如增加数据库迁移，也要在重启服务前运行该命令。
 
 启动前还要检查三个随仓库维护的文件：
 
@@ -314,6 +330,7 @@ LaunchAgent 依赖用户登录会话，退出登录后不会继续运行。需�
 | JM 下载成功但上传失败 | 检查 NapCat 是否可读取实际 PDF 路径、群文件权限、上传超时和配置的大小限制；失败文件位于 JM 任务目录 |
 | 机器人没有原有记忆或历史图片无法读取 | 核对 `LLM_CHAT_STATE_DIR` 是否直接包含四个状态子目录，确认 `media` 一并迁移 |
 | 终端能启动，LaunchAgent 启动失败 | 检查 `service_logs/stderr.log`、plist 中的仓库路径、`.env.macos` 和 macOS 对目录的访问权限 |
+| 表情包插件提示数据库未更新到最新迁移 | 停止 NoneBot 服务，按第 3 节执行 `nb orm upgrade heads`，再启动服务 |
 | 端口已占用 | 执行 `lsof -nP -iTCP:2333 -sTCP:LISTEN`，确认是否同时运行了前台实例和 LaunchAgent |
 
 ## 9. 更新依赖与验证范围
