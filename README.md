@@ -18,11 +18,15 @@ nb run
 
 启动前填写 `.env` 中的群白名单、当前模型对应的 API Key、OneBot 连接配置，以及 `PETERALBUS_WIFE_RES`、`PETERALBUS_WIFE_JM_WORK_DIR`、`WHATPIC_RES_PATH` 三个资源/工作目录。模型与提供商映射位于 `my-bot/plugins/multi_llm_chat/model_routes.json`。
 
-模型路由中的 `use_system_proxy` 可控制单个提供商是否使用操作系统代理；MiMo 配置为 `false`，直接连接其 API。其他提供商未设置时保持 HTTP 客户端默认行为。
+使用火山方舟时，填写 `LLM_CHAT_ARK_API_KEY`，并将 `LLM_CHAT_MODEL` 设置为路由文件中的 `doubao-seed-2-1-lite-260915`、`doubao-seed-2-1-turbo-260628`、`deepseek-v4-1-flash-260910` 或 `glm-5-3-flash-260828`。前三个模型默认关闭深度思考；`glm-5-3-flash-260828` 始终开启深度思考，工具调用后会回传模型返回的思考内容。模型路由在启动时加载，修改后需要重启机器人。上述模型使用普通方舟 API 的 OpenAI 兼容地址，不使用 Agent Plan 的专用地址。
+
+模型路由中的 `use_system_proxy` 可控制单个提供商是否使用操作系统代理；MiMo 和火山方舟配置为 `false`，直接连接其 API。其他提供商未设置时保持 HTTP 客户端默认行为。
 
 `peteralbus_wife` 的路径支持绝对路径和 `~`，相对路径以该插件目录为基准。JM 的任务根目录由 `PETERALBUS_WIFE_JM_WORK_DIR` 指定，`config.json` 维护下载规则。图片资源需要事先准备；JM 工作目录会自动创建。
 
 `start.sh` 用于已有 Linux 环境；`start-macos.sh` 从 `.env.macos` 读取 Miniconda 路径，在指定 Conda 环境中前台启动，不启用自动重载。`.env.macos` 从 `.env.macos.example` 复制，具体配置与常驻管理见部署文档。
+
+macOS 主机状态、NoneBot/NapCat 状态与重启可通过独立的本地管理 API 操作，接口定义和 SSH 隧道说明见[运维 API 文档](docs/ops-api.md)。
 
 ## 对话架构
 
@@ -45,10 +49,11 @@ nb run
 ## 图片理解
 
 收到 OneBot 图片消息后，插件立即从消息段的 `url` 下载图片，校验实际格式和大小，并以内容哈希保存到 `LLM_CHAT_STATE_DIR/media`。聊天事件只保存图片资源引用；构造模型请求时才读取文件并生成 Base64，Base64 不会写入对话状态或原始请求日志。
+单张图片上限为 10 MB；超限图片不会写入媒体存储。
 
 普通聊天上下文全局只直接传入最近一张图片。更早的近期图片在对应消息的内部上下文中标为可读取，并通过按轮次限定范围的 `read_group_image` 工具按需提供给模型；工具返回的多模态消息明确标记为历史图片数据，不会被当作新群员消息。旧图片不会因为未直接传入而重新下载。
 
-`LLM_CHAT_IMAGE_UNDERSTANDING` 控制是否向模型发送 Base64 图片。未配置时遵循模型路由默认值：`mimo-v2.5` 开启，DeepSeek 关闭；显式设置为 `true` 或 `false` 可以覆盖模型默认值。无论开关状态如何，消息存储和图片下载行为都完全相同，关闭时模型继续看到原有的 `[图片]` 文本占位。
+`LLM_CHAT_IMAGE_UNDERSTANDING` 控制是否向模型发送 Base64 图片。未配置时遵循模型路由的 `supports_image_understanding` 设置；显式设置为 `true` 或 `false` 可以覆盖模型默认值。无论开关状态如何，消息存储和图片下载行为都完全相同，关闭时模型继续看到原有的 `[图片]` 文本占位。
 
 旧消息成功压缩并移出近期上下文后，其图片资源随即删除；仍被近期事件引用的同内容图片会继续保留。
 

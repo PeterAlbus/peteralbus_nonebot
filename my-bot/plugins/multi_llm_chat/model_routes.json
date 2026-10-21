@@ -6,6 +6,13 @@
       "supports_tools": true,
       "supports_strict_tools": true
     },
+    "volc_ark": {
+      "base_url": "https://ark.cn-beijing.volces.com/api/v3",
+      "api_key_field": "llm_chat_ark_api_key",
+      "use_system_proxy": false,
+      "supports_tools": true,
+      "supports_strict_tools": true
+    },
     "xiaomi_mimo": {
       "base_url": "https://api.xiaomimimo.com/v1",
       "use_system_proxy": false,
@@ -62,6 +69,31 @@
           }
         }
       }
+    },
+    "doubao-seed-2-1-lite-260915": {
+      "provider": "volc_ark",
+      "supports_image_understanding": true,
+      "create_params": {
+        "extra_body": {"thinking": {"type": "disabled"}}
+      }
+    },
+    "doubao-seed-2-1-turbo-260628": {
+      "provider": "volc_ark",
+      "supports_image_understanding": true,
+      "create_params": {
+        "extra_body": {"thinking": {"type": "disabled"}}
+      }
+    },
+    "deepseek-v4-1-flash-260910": {
+      "provider": "volc_ark",
+      "supports_image_understanding": true,
+      "create_params": {
+        "extra_body": {"thinking": {"type": "disabled"}}
+      }
+    },
+    "glm-5-3-flash-260828": {
+      "provider": "volc_ark",
+      "supports_image_understanding": true
     },
     "mimo-v2.5": {
       "provider": "xiaomi_mimo",

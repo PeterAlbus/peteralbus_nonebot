@@ -1,7 +1,7 @@
 from datetime import datetime, timezone
 
 import pytest
-from multi_llm_chat.media import ImageDownloadError, ImageStore
+from multi_llm_chat.media import MAX_IMAGE_BYTES, ImageDownloadError, ImageStore
 from multi_llm_chat.models import ChatEvent
 
 PNG_DATA = b"\x89PNG\r\n\x1a\n" + b"test-image-content"
@@ -55,6 +55,22 @@ async def test_image_store_rejects_non_image_content(tmp_path):
             content_offset=0,
             media_namespace="onebot:100:invalid",
         )
+
+
+@pytest.mark.asyncio
+async def test_image_store_rejects_image_larger_than_ten_mb(tmp_path):
+    assert MAX_IMAGE_BYTES == 10_000_000
+    store = ImageStore(tmp_path)
+    oversized = PNG_DATA[:8] + b"x" * (MAX_IMAGE_BYTES - 7)
+
+    with pytest.raises(ImageDownloadError, match="图片大小无效"):
+        await store.store_bytes(
+            oversized,
+            placeholder="[图片]",
+            content_offset=0,
+            media_namespace="onebot:100:oversized",
+        )
+    assert not (tmp_path / "media").exists()
 
 
 @pytest.mark.asyncio

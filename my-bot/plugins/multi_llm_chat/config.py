@@ -8,8 +8,9 @@ class Config(BaseModel):
 
     llm_chat_deepseek_api_key: str = ""
     llm_chat_xiaomi_mimo_api_key: str = ""
+    llm_chat_ark_api_key: str = ""
 
-    llm_chat_model: str = "deepseek-v4-flash"
+    llm_chat_model: str = "doubao-seed-2-1-lite-260915"
     llm_chat_temperature: float = 0.7
     llm_chat_max_tokens: int = 4096
     llm_chat_request_timeout: int = 60

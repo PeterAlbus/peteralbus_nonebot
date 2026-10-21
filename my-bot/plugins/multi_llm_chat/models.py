@@ -196,6 +196,7 @@ class AssistantTurn(StrictModel):
     content: str = ""
     tool_calls: List[ToolCall] = Field(default_factory=list)
     reasoning_content: str = ""
+    encrypted_content: str = ""
     finish_reason: str = ""
     usage: Dict[str, Any] = Field(default_factory=dict)
 
@@ -205,6 +206,10 @@ class AssistantTurn(StrictModel):
             "content": self.content or None,
         }
         if self.tool_calls:
+            if self.encrypted_content:
+                message["encrypted_content"] = self.encrypted_content
+            elif self.reasoning_content:
+                message["reasoning_content"] = self.reasoning_content
             message["tool_calls"] = [
                 {
                     "id": call.id,

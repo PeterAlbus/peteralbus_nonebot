@@ -11,8 +11,7 @@ from urllib.request import Request, urlopen
 
 from .models import ChatEvent, ImageResource
 
-MAX_BASE64_CHARS = 50 * 1024 * 1024
-MAX_IMAGE_BYTES = (MAX_BASE64_CHARS // 4) * 3
+MAX_IMAGE_BYTES = 10_000_000
 DOWNLOAD_TIMEOUT_SECONDS = 30
 CHUNK_SIZE = 64 * 1024
 
@@ -166,9 +165,9 @@ class ImageStore:
         data = path.read_bytes()
         if len(data) != image.size or hashlib.sha256(data).hexdigest() != image.sha256:
             raise ImageDownloadError("图片资源校验失败")
+        if len(data) > MAX_IMAGE_BYTES:
+            raise ImageDownloadError("图片超过 10 MB 限制")
         encoded = base64.b64encode(data).decode("ascii")
-        if len(encoded) > MAX_BASE64_CHARS:
-            raise ImageDownloadError("图片超过 Base64 输入大小限制")
         return f"data:{image.mime_type};base64,{encoded}"
 
     def _resolve_media_key(self, media_key: str) -> Path:
@@ -249,7 +248,7 @@ def _download_image(url: str) -> bytes:
             except ValueError as error:
                 raise ImageDownloadError("图片响应长度无效") from error
             if declared_length > MAX_IMAGE_BYTES:
-                raise ImageDownloadError("图片超过 Base64 输入大小限制")
+                raise ImageDownloadError("图片超过 10 MB 限制")
         data = bytearray()
         while True:
             chunk = response.read(CHUNK_SIZE)
@@ -257,5 +256,5 @@ def _download_image(url: str) -> bytes:
                 break
             data.extend(chunk)
             if len(data) > MAX_IMAGE_BYTES:
-                raise ImageDownloadError("图片超过 Base64 输入大小限制")
+                raise ImageDownloadError("图片超过 10 MB 限制")
         return bytes(data)

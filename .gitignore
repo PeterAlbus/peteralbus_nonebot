@@ -15,6 +15,7 @@ venv/
 .env.*
 !.env.example
 !.env.macos.example
+.ops-api.env
 
 # NoneBot runtime state
 *.pid

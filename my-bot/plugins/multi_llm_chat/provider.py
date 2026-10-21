@@ -368,6 +368,7 @@ class LLMProvider:
                 content=content,
                 tool_calls=tool_calls,
                 reasoning_content=str(getattr(message, "reasoning_content", "") or ""),
+                encrypted_content=str(getattr(message, "encrypted_content", "") or ""),
                 finish_reason=finish_reason,
                 usage=usage,
             ),

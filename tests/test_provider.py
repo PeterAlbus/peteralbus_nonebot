@@ -1,7 +1,9 @@
 import json
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
+from multi_llm_chat.models import AssistantTurn, FunctionCall, ToolCall
 from multi_llm_chat.provider import (
     CHAT_REPLY_MAX_CHARS,
     UPSTREAM_BLOCKED_CONTENT,
@@ -74,6 +76,87 @@ def test_provider_can_bypass_system_proxy_for_direct_api(tmp_path, monkeypatch):
     provider._client_for(routes["providers"]["provider"])
     assert clients[-1].http_client is None
     assert len(clients) == 2
+
+
+@pytest.mark.parametrize(
+    "model,thinking_disabled",
+    [
+        ("doubao-seed-2-1-lite-260915", True),
+        ("doubao-seed-2-1-turbo-260628", True),
+        ("deepseek-v4-1-flash-260910", True),
+        ("glm-5-3-flash-260828", False),
+    ],
+)
+def test_ark_routes_support_tools_and_json(model, thinking_disabled, tmp_path):
+    routes_path = (
+        Path(__file__).resolve().parents[1]
+        / "my-bot/plugins/multi_llm_chat/model_routes.json"
+    )
+    ark_config = config()
+    ark_config.llm_chat_model = model
+    ark_config.llm_chat_ark_api_key = "test-key"
+    provider = LLMProvider(ark_config, routes_path, tmp_path / "logs", Logger())
+    resolved_model, provider_config, model_config = provider._resolve_model()
+    tool = {
+        "type": "function",
+        "function": {
+            "name": "get_number",
+            "parameters": {"type": "object", "properties": {}, "additionalProperties": False},
+            "strict": True,
+        },
+    }
+
+    tool_request = provider._build_request(
+        resolved_model,
+        provider_config,
+        model_config,
+        [{"role": "user", "content": "调用工具"}],
+        [tool],
+        "auto",
+        None,
+        False,
+    )
+    json_request = provider._build_request(
+        resolved_model,
+        provider_config,
+        model_config,
+        [{"role": "user", "content": "输出 json"}],
+        None,
+        None,
+        {"type": "json_object"},
+        False,
+    )
+
+    assert provider_config["base_url"] == "https://ark.cn-beijing.volces.com/api/v3"
+    assert provider_config["api_key_field"] == "llm_chat_ark_api_key"
+    assert model_config["supports_image_understanding"] is True
+    assert tool_request["tools"] == [tool]
+    assert tool_request["tool_choice"] == "auto"
+    assert json_request["response_format"] == {"type": "json_object"}
+    assert "tools" not in json_request
+    assert (
+        tool_request.get("extra_body", {}).get("thinking", {}).get("type")
+        == "disabled"
+    ) is thinking_disabled
+
+
+def test_tool_followup_preserves_reasoning_fields():
+    turn = AssistantTurn(
+        tool_calls=[
+            ToolCall(id="call-1", function=FunctionCall(name="get_number", arguments="{}"))
+        ],
+        reasoning_content="reasoning text",
+        encrypted_content="encrypted text",
+    )
+
+    message = turn.as_message()
+
+    assert message["encrypted_content"] == "encrypted text"
+    assert "reasoning_content" not in message
+    assert message["tool_calls"][0]["id"] == "call-1"
+
+    plain_message = turn.model_copy(update={"encrypted_content": ""}).as_message()
+    assert plain_message["reasoning_content"] == "reasoning text"
 
 
 def test_provider_merges_builtin_and_custom_tools_only_for_agent_request(tmp_path):
