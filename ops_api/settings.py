@@ -20,6 +20,11 @@ class OpsSettings:
     api_port: int = 8765
     nonebot_label: str = "com.peteralbus.nonebot"
     nonebot_env_file: Path = Path(".env")
+    model_routes_file: Path | None = None
+    llm_usage_db_file: Path | None = None
+    volc_access_key: str = field(default="", repr=False)
+    volc_secret_key: str = field(default="", repr=False)
+    volc_project_name: str = "default"
     nonebot_log_file: Path = Path("service_logs/nonebot.stdout.log")
     napcat_account: str = ""
     napcat_qq_app: Path = Path("/Applications/QQ.app")
@@ -34,6 +39,22 @@ class OpsSettings:
     def __post_init__(self) -> None:
         root = self.repo_root.expanduser().resolve()
         object.__setattr__(self, "repo_root", root)
+        if self.model_routes_file is not None:
+            object.__setattr__(
+                self,
+                "model_routes_file",
+                _path_value(str(self.model_routes_file), self.model_routes_file, root),
+            )
+        if self.llm_usage_db_file is not None:
+            object.__setattr__(
+                self,
+                "llm_usage_db_file",
+                _path_value(
+                    str(self.llm_usage_db_file),
+                    self.llm_usage_db_file,
+                    root,
+                ),
+            )
         if len(self.api_token) < 32:
             raise ValueError("OPS_API_TOKEN must contain at least 32 characters")
         try:
@@ -78,9 +99,22 @@ class OpsSettings:
         return cls(
             repo_root=root,
             api_token=token,
+            llm_usage_db_file=(
+                Path(values["OPS_LLM_USAGE_DB_FILE"])
+                if values.get("OPS_LLM_USAGE_DB_FILE", "").strip()
+                else None
+            ),
+            volc_access_key=values.get("OPS_VOLC_ACCESS_KEY", ""),
+            volc_secret_key=values.get("OPS_VOLC_SECRET_KEY", ""),
+            volc_project_name=values.get("OPS_VOLC_PROJECT_NAME", "default"),
             api_host=values.get("OPS_API_HOST", "127.0.0.1"),
             api_port=int_value("OPS_API_PORT", 8765),
             nonebot_label=values.get("OPS_NONEBOT_LABEL", "com.peteralbus.nonebot"),
+            model_routes_file=(
+                Path(values["OPS_MODEL_ROUTES_FILE"])
+                if values.get("OPS_MODEL_ROUTES_FILE", "").strip()
+                else None
+            ),
             nonebot_env_file=_path_value(
                 values.get("OPS_NONEBOT_ENV_FILE"), Path(".env"), root
             ),
@@ -107,13 +141,7 @@ class OpsSettings:
             ),
             napcat_webui_port=int_value("OPS_NAPCAT_WEBUI_PORT", 6099),
             napcat_http_port=int_value("OPS_NAPCAT_HTTP_PORT", 3001),
-            shutdown_timeout_seconds=float_value(
-                "OPS_SHUTDOWN_TIMEOUT_SECONDS", 20.0
-            ),
-            startup_timeout_seconds=float_value(
-                "OPS_STARTUP_TIMEOUT_SECONDS", 35.0
-            ),
-            command_timeout_seconds=float_value(
-                "OPS_COMMAND_TIMEOUT_SECONDS", 5.0
-            ),
+            shutdown_timeout_seconds=float_value("OPS_SHUTDOWN_TIMEOUT_SECONDS", 20.0),
+            startup_timeout_seconds=float_value("OPS_STARTUP_TIMEOUT_SECONDS", 35.0),
+            command_timeout_seconds=float_value("OPS_COMMAND_TIMEOUT_SECONDS", 5.0),
         )

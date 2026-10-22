@@ -4,6 +4,8 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple, cast
 from uuid import uuid4
 
+from dotenv import dotenv_values
+
 from nonebot import get_bot, get_plugin_config, on_message, require
 from nonebot.adapters import Bot as BaseBot
 from nonebot.adapters.onebot.v11 import Bot, GroupMessageEvent, Message, MessageSegment
@@ -12,6 +14,8 @@ from nonebot.matcher import current_event as nonebot_current_event
 from nonebot.matcher import current_matcher as nonebot_current_matcher
 from nonebot.params import EventMessage
 from nonebot.rule import Rule
+
+from llm_usage import UsageStore
 
 from .cli_runner import DockerCliRunner
 from .config import Config
@@ -89,10 +93,13 @@ memory_store = GroupMemoryStore(
     max_facts=config.llm_chat_memory_max_facts,
     max_aliases_per_member=config.llm_chat_memory_max_aliases_per_member,
 )
+usage_store = UsageStore(state_dir / "usage.sqlite3")
+usage_store.initialize()
 provider = LLMProvider(
     config=config,
     routes_path=routes_path,
     raw_request_log_dir=raw_request_log_dir,
+    usage_store=usage_store,
     logger=logger,
 )
 daily_digest_config = load_daily_digest_config(daily_digest_config_path)
@@ -119,7 +126,23 @@ cli_runner = DockerCliRunner(
     timeout_seconds=config.llm_chat_cli_timeout_seconds,
     output_max_chars=config.llm_chat_cli_output_max_chars,
 )
+
+
+async def query_current_balance() -> dict[str, Any]:
+    # Only read billing credentials; the bot does not need an operations API token.
+    values = (
+        dotenv_values(plugin_dir.parents[2] / ".ops-api.env")
+        if provider.current_provider_name() == "volc_ark" else {}
+    )
+    return await provider.get_balance(
+        values.get("OPS_VOLC_ACCESS_KEY") or "",
+        values.get("OPS_VOLC_SECRET_KEY") or "",
+    )
+
+
 tool_registry = build_default_tool_registry(
+    balance_query=query_current_balance,
+    usage_store=usage_store,
     roster_service=roster_service,
     memory_store=memory_store,
     tool_timeout_seconds=config.llm_chat_tool_timeout_seconds,

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import json
 from collections.abc import Sequence
 from pathlib import Path
@@ -8,6 +9,9 @@ from typing import Any
 from uuid import uuid4
 
 from openai import AsyncOpenAI, DefaultAsyncHttpxClient
+
+from llm_accounts import ProviderAccounts
+from llm_usage import UsageStore
 
 from .conversation import INTERNAL_EVENT_CONTEXT_MARKER
 from .models import AssistantTurn, FunctionCall, ToolCall
@@ -40,7 +44,9 @@ class LLMProvider:
         routes_path: Path,
         raw_request_log_dir: Path,
         logger: Any,
+        usage_store: UsageStore,
     ) -> None:
+        self._usage_store = usage_store
         self._config = config
         self._routes_path = routes_path
         self._raw_request_log_dir = raw_request_log_dir
@@ -101,6 +107,21 @@ class LLMProvider:
             self._client_params = params
         return self._client
 
+    def current_provider_name(self) -> str:
+        return self._resolve_model()[2]["provider"]
+
+    async def get_balance(self, volc_access_key: str, volc_secret_key: str) -> dict[str, Any]:
+        model, provider_config, model_config = self._resolve_model()
+        provider_name = model_config["provider"]
+        api_key_field = str(provider_config.get("api_key_field", ""))
+        accounts = ProviderAccounts(
+            deepseek_api_key=str(getattr(self._config, api_key_field, "") or "").strip()
+            if provider_name == "deepseek" else "",
+            volc_access_key=volc_access_key,
+            volc_secret_key=volc_secret_key,
+        )
+        return {"model": model, **await accounts.balance(provider_name)}
+
     def image_understanding_enabled(self) -> bool:
         _, _, model_config = self._resolve_model()
         configured = self._config.llm_chat_image_understanding
@@ -137,6 +158,7 @@ class LLMProvider:
             "turn_id": turn_id,
             "step": step,
             "model": model,
+            "provider": model_config["provider"],
         }
         max_attempts = UPSTREAM_BLOCK_MAX_RETRIES + 1
         for attempt in range(1, max_attempts + 1):
@@ -203,6 +225,10 @@ class LLMProvider:
             max_attempts,
             message_count,
         )
+        await asyncio.to_thread(
+            self._usage_store.begin, request_id, attempt,
+            common_metadata["provider"], common_metadata["model"], request_type,
+        )
         raw_response = None
         try:
             raw_response = await client.chat.completions.with_raw_response.create(
@@ -210,6 +236,10 @@ class LLMProvider:
             )
             result = raw_response.parse()
         except Exception as error:
+            await asyncio.to_thread(
+                self._usage_store.finish, request_id, attempt, {}, "error",
+                int(getattr(raw_response, "retries_taken", 0) or 0),
+            )
             attempt_elapsed_ms = round((perf_counter() - attempt_started_at) * 1000)
             total_elapsed_ms = round((perf_counter() - total_started_at) * 1000)
             status_code = getattr(error, "status_code", None) or getattr(
@@ -255,6 +285,11 @@ class LLMProvider:
             )
             raise
 
+        usage = result.usage.model_dump() if result.usage else {}
+        await asyncio.to_thread(
+            self._usage_store.finish, request_id, attempt, usage, "completed",
+            int(getattr(raw_response, "retries_taken", 0) or 0),
+        )
         choice = result.choices[0]
         message = choice.message
         raw_content = message.content or ""
@@ -286,7 +321,6 @@ class LLMProvider:
             for call in (message.tool_calls or [])
             if getattr(call, "type", "function") == "function"
         ]
-        usage = result.usage.model_dump() if result.usage else {}
         attempt_elapsed_ms = round((perf_counter() - attempt_started_at) * 1000)
         total_elapsed_ms = round((perf_counter() - total_started_at) * 1000)
         provider_request_id = str(

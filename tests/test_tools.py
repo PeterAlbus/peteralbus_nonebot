@@ -482,6 +482,8 @@ def test_strict_schema_inlines_models_and_removes_unsupported_constraints():
 
 def test_default_tool_registry_does_not_expose_run_cli():
     registry = build_default_tool_registry(
+        usage_store=object(),
+        balance_query=object(),
         roster_service=object(),
         memory_store=object(),
         tool_timeout_seconds=10,
@@ -494,6 +496,8 @@ def test_default_tool_registry_does_not_expose_run_cli():
         if tool["type"] == "function"
     }
     assert tool_names == {
+        "get_token_usage",
+        "get_balance",
         "get_current_group_info",
         "list_current_group_members",
         "get_current_group_member",

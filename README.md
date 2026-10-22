@@ -105,11 +105,17 @@ OneBot V11 是群身份的基础数据源。插件使用以下 API：
 - 列出当前群成员。
 - 刷新并获取指定群成员。
 - 搜索当前群记忆。
+- 通过 `get_token_usage` 查询小P自身的 Token 用量，可按北京时间日期、供应商、模型和请求类型筛选。
+- 通过 `get_balance` 查询当前模型所属供应商的账号余额：支持 DeepSeek 和火山，MiMo 返回不支持。
 - 通过 `reply_to_event` 设置最终消息要引用的近期事件。
 - 通过 `mention_members` 添加最终消息要 `@` 的当前群成员。
 - 通过 `read_group_image` 按需读取本轮近期上下文中未直接传入的图片。
 
-所有工具都使用严格 JSON Schema 和 Pydantic 参数校验，并受最大工具轮次限制；执行外部逻辑的工具还具有执行超时和输出上限。工具只能访问当前群上下文。
+所有工具都使用严格 JSON Schema 和 Pydantic 参数校验，并受最大工具轮次限制；执行外部逻辑的工具还具有执行超时和输出上限。群信息、记忆和图片工具限定当前群上下文；`get_token_usage` 返回机器人所有群和后台任务的用量汇总，不包含聊天内容。
+
+Token 用量持久化在 `LLM_CHAT_STATE_DIR/usage.sqlite3`，从启用时开始记录，不随原始日志清理。统计以实际响应 `usage` 为准，缓存和推理 Token 是输入、输出的子项；未知用量请求单独计数。运维查询接口和供应商余额查询配置见 [运维 API 文档](docs/ops-api.md#余额与-token-用量)。
+
+余额工具根据运行中已加载的模型路由选择供应商。DeepSeek 使用该路由指定的 API Key；火山从仓库根目录 `.ops-api.env` 读取 `OPS_VOLC_ACCESS_KEY` 和 `OPS_VOLC_SECRET_KEY`。工具直接调用官方接口，共用运维查询实现，不需要运维服务在线或管理 Token。火山返回整个云账号余额；未配置、失败和不支持状态均不表示零余额。
 
 `reply_to_event` 和 `mention_members` 只修改当前 Agent 轮次内的回复草稿，不直接调用 OneBot。模型完成工具调用后继续输出普通文本正文，发送层统一拼装 `reply`、`at` 和 `text` 消息段并只发送一次。引用目标必须是近期上下文中保存了 OneBot `message_id` 的事件；`@` 目标必须来自当前群成员快照，且不能是机器人自己。`read_group_image` 只接受本轮上下文明确提供的 `event_id` 与 `image_index`，不能读取其他群、已压缩事件或任意文件。
 

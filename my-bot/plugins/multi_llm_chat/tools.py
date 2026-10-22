@@ -3,6 +3,7 @@ import copy
 import importlib
 import json
 from dataclasses import dataclass, field
+from datetime import date
 from pathlib import Path
 from typing import (
     Any,
@@ -19,6 +20,8 @@ from typing import (
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
+from llm_usage import UsageStore
+
 from .cli_runner import DockerCliRunner
 from .conversation import ConversationStore
 from .identity import GroupRosterService
@@ -29,6 +32,14 @@ from .provider import LLMProvider
 
 class ToolArguments(BaseModel):
     model_config = ConfigDict(extra="forbid")
+
+
+class TokenUsageArguments(ToolArguments):
+    start_date: Optional[str] = Field(default=None, description="起始日期 YYYY-MM-DD，含当天")
+    end_date: Optional[str] = Field(default=None, description="结束日期 YYYY-MM-DD，含当天")
+    provider: Optional[str] = None
+    model: Optional[str] = None
+    request_type: Optional[str] = None
 
 
 class EmptyArguments(ToolArguments):
@@ -541,12 +552,26 @@ def finish_without_reply_schema() -> Dict[str, Any]:
 
 
 def build_default_tool_registry(
+    usage_store: UsageStore,
+    balance_query: Callable[[], Awaitable[Dict[str, Any]]],
     roster_service: GroupRosterService,
     memory_store: GroupMemoryStore,
     tool_timeout_seconds: int,
     output_max_chars: int,
 ) -> ToolRegistry:
     registry = ToolRegistry(output_max_chars=output_max_chars)
+
+    async def get_token_usage(context: ToolContext, arguments: BaseModel) -> Any:
+        args = TokenUsageArguments.model_validate(arguments.model_dump())
+        return await asyncio.to_thread(
+            usage_store.query,
+            start_date=date.fromisoformat(args.start_date) if args.start_date else None,
+            end_date=date.fromisoformat(args.end_date) if args.end_date else None,
+            provider=args.provider, model=args.model, request_type=args.request_type,
+        )
+
+    async def get_balance(context: ToolContext, arguments: BaseModel) -> Any:
+        return await balance_query()
 
     async def get_group_info(context: ToolContext, arguments: BaseModel) -> Any:
         roster = await roster_service.get_roster(context.group_id)
@@ -615,6 +640,25 @@ def build_default_tool_registry(
         return matches[:20]
 
     for definition in (
+        ToolDefinition(
+            name="get_balance",
+            description=("查询小P当前已加载模型所属供应商的账号余额，自动判断供应商，不接受指定其他供应商。"
+                         "支持 DeepSeek 和火山；xiaomi_mimo 返回不支持。火山余额属于整个云账号，"
+                         "不是小P专属余额。未配置或查询失败不能解释为零余额。"),
+            arguments_model=EmptyArguments,
+            executor=get_balance,
+            timeout_seconds=tool_timeout_seconds,
+        ),
+        ToolDefinition(
+            name="get_token_usage",
+            description=("查询小P自身所有群聊及后台任务的已记录 Token 用量，按北京时间日期（含首尾）统计。"
+                         "日期为空时查询今天，可按供应商、模型、请求类型筛选。"
+                         "返回输入/输出/总量及缓存、推理子项和未知用量请求数；子项不能重复加到总量。"
+                         "统计从 tracking_started_at 开始，缺失用量不是零；不含尚未生成的本次最终回答。"),
+            arguments_model=TokenUsageArguments,
+            executor=get_token_usage,
+            timeout_seconds=tool_timeout_seconds,
+        ),
         ToolDefinition(
             name="get_current_group_info",
             description="获取当前群的名称、成员数量和成员快照更新时间。",

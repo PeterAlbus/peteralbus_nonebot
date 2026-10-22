@@ -12,6 +12,13 @@ from multi_llm_chat.tools import AgentRunResult
 from nonebot.adapters.onebot.v11 import GroupMessageEvent, Message, MessageSegment
 
 
+@pytest.fixture(scope="module", autouse=True)
+def isolate_handler_state(tmp_path_factory):
+    with pytest.MonkeyPatch.context() as patch:
+        patch.setenv("LLM_CHAT_STATE_DIR", str(tmp_path_factory.mktemp("handler-state")))
+        yield
+
+
 def make_group_event(message: Message) -> GroupMessageEvent:
     return GroupMessageEvent(
         time=1_777_000_000,

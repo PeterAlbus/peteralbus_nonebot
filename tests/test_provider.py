@@ -13,6 +13,8 @@ from multi_llm_chat.provider import (
     normalize_outbound_content,
 )
 
+from llm_usage import UsageStore
+
 
 class Logger:
     def __init__(self):
@@ -28,6 +30,12 @@ class Logger:
 
     def warning(self, *args, **kwargs):
         self.warning_records.append((args, kwargs))
+
+
+def usage_store(tmp_path):
+    store = UsageStore(tmp_path / "usage.sqlite3")
+    store.initialize()
+    return store
 
 
 def config():
@@ -55,7 +63,7 @@ def test_provider_can_bypass_system_proxy_for_direct_api(tmp_path, monkeypatch):
     }
     routes_path = tmp_path / "routes.json"
     routes_path.write_text(json.dumps(routes), encoding="utf-8")
-    provider = LLMProvider(config(), routes_path, tmp_path / "logs", Logger())
+    provider = LLMProvider(config(), routes_path, tmp_path / "logs", Logger(), usage_store(tmp_path))
     clients = []
 
     def fake_openai(**kwargs):
@@ -97,7 +105,7 @@ def test_ark_routes_support_tools_and_json(model, thinking_disabled, tmp_path):
     ark_config = config()
     ark_config.llm_chat_model = model
     ark_config.llm_chat_ark_api_key = "test-key"
-    provider = LLMProvider(ark_config, routes_path, tmp_path / "logs", Logger())
+    provider = LLMProvider(ark_config, routes_path, tmp_path / "logs", Logger(), usage_store(tmp_path))
     resolved_model, provider_config, model_config = provider._resolve_model()
     tool = {
         "type": "function",
@@ -175,7 +183,7 @@ def test_provider_merges_builtin_and_custom_tools_only_for_agent_request(tmp_pat
     }
     routes_path = tmp_path / "routes.json"
     routes_path.write_text(json.dumps(routes), encoding="utf-8")
-    provider = LLMProvider(config(), routes_path, tmp_path / "logs", Logger())
+    provider = LLMProvider(config(), routes_path, tmp_path / "logs", Logger(), usage_store(tmp_path))
     custom = {"type": "function", "function": {"name": "add"}}
 
     with_builtin = provider._build_request(
@@ -218,7 +226,7 @@ def test_provider_uses_provider_specific_output_token_field(tmp_path):
     }
     routes_path = tmp_path / "routes.json"
     routes_path.write_text(json.dumps(routes), encoding="utf-8")
-    provider = LLMProvider(config(), routes_path, tmp_path / "logs", Logger())
+    provider = LLMProvider(config(), routes_path, tmp_path / "logs", Logger(), usage_store(tmp_path))
 
     request = provider._build_request(
         "model",
@@ -260,7 +268,7 @@ def test_image_understanding_uses_model_default_and_env_override(tmp_path):
 
     mimo_config = config()
     mimo_config.llm_chat_model = "mimo-v2.6-flash"
-    mimo = LLMProvider(mimo_config, routes_path, tmp_path / "logs", Logger())
+    mimo = LLMProvider(mimo_config, routes_path, tmp_path / "logs", Logger(), usage_store(tmp_path))
     deepseek_config = config()
     deepseek_config.llm_chat_model = "deepseek-v4-pro"
     deepseek = LLMProvider(
@@ -268,6 +276,7 @@ def test_image_understanding_uses_model_default_and_env_override(tmp_path):
         routes_path,
         tmp_path / "logs",
         Logger(),
+        usage_store(tmp_path),
     )
 
     assert mimo.image_understanding_enabled() is True
@@ -368,7 +377,7 @@ def provider_for_completion(tmp_path, logger=None):
     }
     routes_path = tmp_path / "routes.json"
     routes_path.write_text(json.dumps(routes), encoding="utf-8")
-    return LLMProvider(config(), routes_path, tmp_path / "logs", logger or Logger())
+    return LLMProvider(config(), routes_path, tmp_path / "logs", logger or Logger(), usage_store(tmp_path))
 
 
 @pytest.mark.asyncio
@@ -589,3 +598,29 @@ def test_outbound_content_rejects_internal_event_context():
         normalize_outbound_content(
             '内部群聊消息上下文（仅用于理解，不得复述）：\nevent_id="e1"'
         )
+
+
+@pytest.mark.asyncio
+async def test_usage_ledger_counts_each_blocked_retry_before_final_reply(tmp_path):
+    provider = provider_for_completion(tmp_path)
+    provider._client_for = lambda _: fake_client(responses=[
+        FakeRawResponse(UPSTREAM_BLOCKED_CONTENT), FakeRawResponse('回答'),
+    ])
+    await provider.complete(messages=[{'role': 'user', 'content': 'x'}],
+                            request_type='daily_digest', turn_id='t', step=0)
+    totals = provider._usage_store.query()['totals']
+    assert totals['requests'] == 2
+    assert totals['total_tokens'] == 32
+    assert totals['unknown_usage_requests'] == 0
+
+
+@pytest.mark.asyncio
+async def test_usage_ledger_records_failed_calls_as_unknown(tmp_path):
+    provider = provider_for_completion(tmp_path)
+    provider._client_for = lambda _: fake_client(error=RuntimeError('failed'))
+    with pytest.raises(RuntimeError):
+        await provider.complete(messages=[{'role': 'user', 'content': 'x'}],
+                                request_type='memory_maintenance', turn_id='t', step=0)
+    totals = provider._usage_store.query()['totals']
+    assert totals['requests'] == totals['unknown_usage_requests'] == totals['failed_requests'] == 1
+    assert totals['total_tokens'] is None
