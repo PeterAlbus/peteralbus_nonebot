@@ -83,7 +83,9 @@ def test_provider_can_bypass_system_proxy_for_direct_api(tmp_path, monkeypatch):
     [
         ("doubao-seed-2-1-lite-260915", True),
         ("doubao-seed-2-1-turbo-260628", True),
-        ("deepseek-v4-1-flash-260910", True),
+        ("doubao-seed-2-1-pro-260915", True),
+        ("doubao-seed-evolving", True),
+        ("deepseek-v4-1-flash-261017", True),
         ("glm-5-3-flash-260828", False),
     ],
 )
@@ -243,11 +245,11 @@ def test_image_understanding_uses_model_default_and_env_override(tmp_path):
             }
         },
         "models": {
-            "mimo-v2.5": {
+            "mimo-v2.6-flash": {
                 "provider": "provider",
                 "supports_image_understanding": True,
             },
-            "deepseek-v4-flash": {
+            "deepseek-v4-pro": {
                 "provider": "provider",
                 "supports_image_understanding": False,
             },
@@ -257,10 +259,10 @@ def test_image_understanding_uses_model_default_and_env_override(tmp_path):
     routes_path.write_text(json.dumps(routes), encoding="utf-8")
 
     mimo_config = config()
-    mimo_config.llm_chat_model = "mimo-v2.5"
+    mimo_config.llm_chat_model = "mimo-v2.6-flash"
     mimo = LLMProvider(mimo_config, routes_path, tmp_path / "logs", Logger())
     deepseek_config = config()
-    deepseek_config.llm_chat_model = "deepseek-v4-flash"
+    deepseek_config.llm_chat_model = "deepseek-v4-pro"
     deepseek = LLMProvider(
         deepseek_config,
         routes_path,

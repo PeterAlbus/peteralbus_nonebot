@@ -48,9 +48,9 @@
     }
   },
   "models": {
-    "deepseek-v4-flash": {
+    "deepseek-flash": {
       "provider": "deepseek",
-      "supports_image_understanding": false,
+      "supports_image_understanding": true,
       "create_params": {
         "extra_body": {
           "thinking": {
@@ -84,7 +84,21 @@
         "extra_body": {"thinking": {"type": "disabled"}}
       }
     },
-    "deepseek-v4-1-flash-260910": {
+    "doubao-seed-2-1-pro-260915": {
+      "provider": "volc_ark",
+      "supports_image_understanding": true,
+      "create_params": {
+        "extra_body": {"thinking": {"type": "disabled"}}
+      }
+    },
+    "doubao-seed-evolving": {
+      "provider": "volc_ark",
+      "supports_image_understanding": true,
+      "create_params": {
+        "extra_body": {"thinking": {"type": "disabled"}}
+      }
+    },
+    "deepseek-v4-1-flash-261017": {
       "provider": "volc_ark",
       "supports_image_understanding": true,
       "create_params": {
@@ -95,7 +109,7 @@
       "provider": "volc_ark",
       "supports_image_understanding": true
     },
-    "mimo-v2.5": {
+    "mimo-v2.6-flash": {
       "provider": "xiaomi_mimo",
       "supports_image_understanding": true
     }
