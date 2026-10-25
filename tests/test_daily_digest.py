@@ -30,9 +30,29 @@ from multi_llm_chat.daily_digest import (
     validate_selection,
 )
 from multi_llm_chat.models import AssistantTurn
+from pydantic import ValidationError
 
 SHANGHAI = ZoneInfo("Asia/Shanghai")
 NOW = datetime(2026, 8, 25, 10, 0, tzinfo=SHANGHAI)
+
+
+def test_model_selection_ignores_metadata_without_weakening_business_fields():
+    selection = DigestSelection.model_validate({
+        "type": "json_object", "explanation": "metadata",
+        "items": [{"item_id": "news-1", "text": "有效摘要", "category": "news", "url": "https://untrusted.example"}],
+    })
+    assert selection.model_dump() == {"items": [{"item_id": "news-1", "text": "有效摘要"}]}
+    for payload in [
+        {"type": "json_object"},
+        {"items": "not a list"},
+        {"items": [{"item_id": "news-1", "text": ""}]},
+        {"items": [{"item_id": "news-1", "text": "字" * 181}]},
+        {"items": [{"item_id": "news-1", "text": "https://untrusted.example"}]},
+    ]:
+        with pytest.raises(ValidationError):
+            DigestSelection.model_validate(payload)
+    with pytest.raises(ValidationError):
+        DailyDigestConfig.model_validate({"groups": [], "unknown_config": True})
 
 
 @pytest.mark.asyncio

@@ -12,8 +12,10 @@ from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any
 
+import httpx
 from dotenv import dotenv_values
 
+from .daily_digest import INTERNAL_DIGEST_PATH
 from .settings import OpsSettings
 from .system import get_system_status
 
@@ -186,6 +188,29 @@ class OpsSupervisor:
             "http": {"host": host, "port": port, "listening": listening},
             "onebot": connection,
         }
+
+    async def trigger_daily_digest(self, values: dict[str, Any]) -> dict[str, Any]:
+        url = f"http://127.0.0.1:{self._nonebot_port()}{INTERNAL_DIGEST_PATH}"
+        try:
+            async with httpx.AsyncClient(trust_env=False, timeout=180) as client:
+                response = await client.post(
+                    url,
+                    headers={"Authorization": f"Bearer {self.settings.api_token}"},
+                    json=values,
+                )
+        except httpx.TimeoutException as error:
+            raise OpsActionError(
+                "日报请求等待超时，任务可能仍在执行；请先检查日志及群消息", 504
+            ) from error
+        except httpx.RequestError as error:
+            raise OpsActionError("无法连接 NoneBot 日报入口，请确认机器人已启动", 503) from error
+        if not response.is_success:
+            try:
+                detail = response.json().get("detail", "日报触发失败")
+            except (ValueError, AttributeError):
+                detail = "日报触发失败"
+            raise OpsActionError(str(detail), response.status_code)
+        return response.json()
 
     def _qq_processes(self) -> tuple[list[int], list[str]]:
         result = _run(["ps", "-axo", "pid=,command="], timeout=5.0)

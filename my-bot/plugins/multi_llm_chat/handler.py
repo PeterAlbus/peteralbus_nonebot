@@ -3,10 +3,11 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple, cast
 from uuid import uuid4
+from zoneinfo import ZoneInfo
 
 from dotenv import dotenv_values
-
-from nonebot import get_bot, get_plugin_config, on_message, require
+from fastapi import HTTPException
+from nonebot import get_bot, get_driver, get_plugin_config, on_message, require
 from nonebot.adapters import Bot as BaseBot
 from nonebot.adapters.onebot.v11 import Bot, GroupMessageEvent, Message, MessageSegment
 from nonebot.log import logger
@@ -16,13 +17,19 @@ from nonebot.params import EventMessage
 from nonebot.rule import Rule
 
 from llm_usage import UsageStore
+from ops_api.daily_digest import register_daily_digest_endpoint
 
 from .cli_runner import DockerCliRunner
 from .config import Config
 from .context import ContextBuilder
 from .conversation import ConversationStore
-from .daily_digest import DailyDigestService, load_daily_digest_config
+from .daily_digest import (
+    DailyDigestReceipt,
+    DailyDigestService,
+    load_daily_digest_config,
+)
 from .identity import GroupRosterService
+from .json_store import atomic_write_json_model, load_json_model
 from .maintenance import ConversationMaintainer
 from .media import ImageDownloadError, ImageStore
 from .memory import GroupMemoryStore
@@ -147,6 +154,9 @@ tool_registry = build_default_tool_registry(
     memory_store=memory_store,
     tool_timeout_seconds=config.llm_chat_tool_timeout_seconds,
     output_max_chars=config.llm_chat_tool_output_max_chars,
+    url_reader=(
+        provider.read_urls if provider.current_provider_name() == "volc_ark" else None
+    ),
 )
 register_custom_tool_module(tool_registry, config.llm_chat_custom_tools_module)
 agent_runner = AgentRunner(
@@ -174,6 +184,7 @@ _reply_locks: Dict[str, asyncio.Lock] = {}
 _passive_tasks: Dict[str, asyncio.Task] = {}
 _roster_sync_tasks: Dict[str, asyncio.Task] = {}
 _maintenance_tasks: Dict[str, asyncio.Task] = {}
+_daily_digest_locks: Dict[str, asyncio.Lock] = {}
 
 
 async def check_whitelist(event: GroupMessageEvent) -> bool:
@@ -756,6 +767,161 @@ async def clean_expired_raw_request_logs() -> None:
         logger.info("已清理过期大模型原始请求日志: file_count={}", deleted_count)
 
 
+async def run_daily_digest(
+    group_id: str,
+    send: bool = False,
+    force: bool = False,
+    trigger: str = "manual",
+) -> dict[str, Any]:
+    group = next(
+        (
+            item
+            for item in daily_digest_config.groups
+            if item.group_id == group_id and item.enabled
+        ),
+        None,
+    )
+    if group is None:
+        raise HTTPException(404, "目标群未启用日报")
+    lock = _daily_digest_locks.setdefault(group_id, asyncio.Lock())
+    if lock.locked():
+        raise HTTPException(409, "该群日报正在生成或发送，请勿重复触发")
+    async with lock:
+        try:
+            timezone = ZoneInfo(daily_digest_config.timezone)
+            today = datetime.now(timezone).date().isoformat()
+            receipt_path = state_dir / "daily_digest_receipts" / f"{group_id}.json"
+            if not send:
+                message = await daily_digest_service.build_message(group)
+                return {
+                    "status": "preview",
+                    "group_id": group_id,
+                    "date": today,
+                    "message": message,
+                    "chars": len(message),
+                }
+            if not force:
+                receipt = await asyncio.to_thread(
+                    load_json_model,
+                    receipt_path,
+                    DailyDigestReceipt,
+                    DailyDigestReceipt,
+                )
+                # Also recognize receipts written to conversation history before
+                # the separate receipt file was introduced.
+                if receipt.date != today:
+                    state = await conversation_store.get(group_id)
+                    for event in reversed(state.recent_events):
+                        if (
+                            event.source == "llm:daily_digest"
+                            and event.sent_at.astimezone(timezone).date().isoformat()
+                            == today
+                        ):
+                            receipt = DailyDigestReceipt(
+                                date=today,
+                                message_id=event.platform_message_id or "",
+                                sent_at=event.sent_at,
+                            )
+                            break
+                if receipt.date == today:
+                    return {
+                        "status": "already_sent",
+                        "group_id": group_id,
+                        "date": today,
+                        "message_id": receipt.message_id,
+                        "sent_at": receipt.sent_at.isoformat()
+                        if receipt.sent_at
+                        else None,
+                    }
+            try:
+                bot = cast(Bot, get_bot())
+            except ValueError as error:
+                raise HTTPException(503, "当前没有已连接的 OneBot 实例") from error
+            _cancel_passive_task(group_id)
+            async with _reply_lock(group_id):
+                message = await daily_digest_service.build_message(group)
+                send_result = await bot.call_api(
+                    "send_group_msg",
+                    group_id=int(group_id),
+                    message=message,
+                )
+                message_id = (
+                    str(send_result.get("message_id", "") or "")
+                    if isinstance(send_result, dict)
+                    else ""
+                )
+                sent_at = datetime.now(timezone)
+                receipt = DailyDigestReceipt(
+                    date=today, message_id=message_id, sent_at=sent_at
+                )
+                receipt_persisted = True
+                try:
+                    await asyncio.to_thread(
+                        atomic_write_json_model, receipt_path, receipt
+                    )
+                except OSError as error:
+                    receipt_persisted = False
+                    logger.opt(exception=error).error(
+                        "日报已发送但回执写入失败: group_id={}", group_id
+                    )
+                history_recorded = True
+                try:
+                    state = await conversation_store.append(
+                        ChatEvent(
+                            event_id=f"llm:daily_digest:{group_id}:{message_id or uuid4().hex}",
+                            platform_message_id=message_id or None,
+                            group_id=group_id,
+                            role="assistant",
+                            source="llm:daily_digest",
+                            content=message,
+                            sent_at=sent_at,
+                        )
+                    )
+                    _ensure_conversation_maintenance(group_id, state)
+                except Exception as error:
+                    history_recorded = False
+                    logger.opt(exception=error).error(
+                        "日报已发送但历史记录失败: group_id={}", group_id
+                    )
+                logger.info(
+                    "日报发送成功: group_id={}, message_id={}, chars={}, trigger={}",
+                    group_id,
+                    message_id,
+                    len(message),
+                    trigger,
+                )
+                return {
+                    "status": "sent",
+                    "group_id": group_id,
+                    "date": today,
+                    "message_id": message_id,
+                    "message": message,
+                    "chars": len(message),
+                    "receipt_persisted": receipt_persisted,
+                    "history_recorded": history_recorded,
+                }
+        except HTTPException:
+            raise
+        except Exception as error:
+            logger.opt(exception=error).error(
+                "日报生成或发送失败: group_id={}, error_type={}",
+                group_id,
+                type(error).__name__,
+            )
+            raise HTTPException(
+                502, "日报生成或发送失败，请检查 NoneBot 日志及群消息"
+            ) from error
+
+
+register_daily_digest_endpoint(
+    get_driver().server_app,
+    lambda: str(
+        dotenv_values(plugin_dir.parents[2] / ".ops-api.env").get("OPS_API_TOKEN") or ""
+    ),
+    run_daily_digest,
+)
+
+
 @scheduler.scheduled_job(
     "cron",
     hour=daily_digest_config.send_time.hour,
@@ -765,51 +931,15 @@ async def clean_expired_raw_request_logs() -> None:
     max_instances=1,
 )
 async def send_daily_digests() -> None:
-    try:
-        bot = cast(Bot, get_bot())
-    except ValueError:
-        logger.error("日报发送失败: 当前没有已连接的 OneBot 实例")
-        return
     for group in daily_digest_config.groups:
         if not group.enabled:
             continue
-        _cancel_passive_task(group.group_id)
         try:
-            async with _reply_lock(group.group_id):
-                message = await daily_digest_service.build_message(group)
-                send_result = await bot.call_api(
-                    "send_group_msg",
-                    group_id=int(group.group_id),
-                    message=message,
-                )
-                message_id = ""
-                if isinstance(send_result, dict):
-                    message_id = str(send_result.get("message_id", "") or "")
-                sent_at = datetime.now().astimezone()
-                state = await conversation_store.append(
-                    ChatEvent(
-                        event_id=(
-                            f"llm:daily_digest:{group.group_id}:"
-                            f"{message_id or uuid4().hex}"
-                        ),
-                        platform_message_id=message_id or None,
-                        group_id=group.group_id,
-                        role="assistant",
-                        source="llm:daily_digest",
-                        content=message,
-                        sent_at=sent_at,
-                    )
-                )
-                _ensure_conversation_maintenance(group.group_id, state)
-                logger.info(
-                    "日报发送成功: group_id={}, message_id={}, chars={}",
-                    group.group_id,
-                    message_id,
-                    len(message),
-                )
-        except Exception as error:
-            logger.opt(exception=error).error(
-                "日报生成或发送失败: group_id={}, error_type={}",
+            await run_daily_digest(group.group_id, send=True, trigger="scheduled")
+        except HTTPException as error:
+            logger.error(
+                "日报任务未完成: group_id={}, status={}, detail={}",
                 group.group_id,
-                type(error).__name__,
+                error.status_code,
+                error.detail,
             )

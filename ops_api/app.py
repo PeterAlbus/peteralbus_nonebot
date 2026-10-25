@@ -14,6 +14,7 @@ from llm_accounts import AccountQueryError
 from llm_usage import UsageStore
 
 from .config_store import ConfigValidationError, EnvConfigStore
+from .daily_digest import DailyDigestRequest
 from .model_routes_store import ModelRoutesStore
 from .provider_accounts import provider_accounts_for_settings
 from .settings import OpsSettings
@@ -91,6 +92,10 @@ def create_app(
     @app.post("/api/v1/nonebot/restart", dependencies=[Depends(require_admin)])
     def nonebot_restart() -> dict[str, Any]:
         return app.state.supervisor.restart_nonebot()
+
+    @app.post("/api/v1/nonebot/daily-digest", dependencies=[Depends(require_admin)])
+    async def trigger_daily_digest(values: DailyDigestRequest) -> dict[str, Any]:
+        return await app.state.supervisor.trigger_daily_digest(values.model_dump())
 
     @app.get("/api/v1/nonebot/config", dependencies=[Depends(require_admin)])
     def nonebot_config() -> dict[str, Any]:

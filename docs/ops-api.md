@@ -30,6 +30,7 @@ openssl rand -hex 32
 | `GET` | `/api/v1/napcat` | QQ/NapCat 进程、登录状态估算、WebUI/API 端口和 OneBot 状态 |
 | `POST` | `/api/v1/napcat/restart` | 仅重启配置账号的 QQ/NapCat，并等待服务端口启动 |
 | `POST` | `/api/v1/nonebot/restart` | 使用 `launchctl kickstart -k` 重启 NoneBot LaunchAgent |
+| `POST` | `/api/v1/nonebot/daily-digest` | 手动生成日报预览，或向已启用日报的群发送 |
 | `GET` | `/api/v1/nonebot/config` | 读取 `.env.example` 中允许管理的 NoneBot 配置 |
 | `PATCH` | `/api/v1/nonebot/config` | 修改允许管理的 `.env` 字段，返回 `restart_required: true` |
 | `GET` | `/api/v1/nonebot/model-routes/models` | 读取 `OPS_MODEL_ROUTES_FILE` 中完整的 `models` |
@@ -54,6 +55,26 @@ curl -X PATCH http://127.0.0.1:8765/api/v1/nonebot/config \
 ```
 
 NapCat 重启会先查找命令行中明确带有 `-q <OPS_NAPCAT_ACCOUNT>` 的 QQ 进程，只结束该机器人实例，然后通过 macOS `open -a QQ.app --args --no-sandbox -q <账号>` 重新启动。不会用 `pkill QQ` 结束其他 QQ 账号。若进程命令不符合已配置账号，接口会拒绝重启。
+
+## 手动预览与补发日报
+
+`POST /api/v1/nonebot/daily-digest` 复用运维 Bearer Token。请求由管理服务转发给正在运行的 NoneBot，使用它已加载的模型、日报配置和 OneBot 连接，不启动第二个机器人进程。
+
+请求参数为 `group_id`（字符串，必填）、`send`（布尔值，默认 `false`）、`force`（布尔值，默认 `false`）。目标群必须已经在日报配置中启用。默认生成预览；预览会请求天气、新闻源和模型，产生正常的推理用量，但不会发送群消息或写入发送回执。
+
+Windows CMD 预览命令（自行替换 Token）：
+
+```bat
+curl.exe --max-time 190 -X POST "https://peteralbus.com/ops-api/api/v1/nonebot/daily-digest" -H "Authorization: Bearer YOUR_TOKEN" -H "Content-Type: application/json" -d "{\"group_id\":\"748245950\",\"send\":false}"
+```
+
+发送时将 `send` 改为 `true`。发送的是调用时最近 24 小时的内容，会重新生成，不重放上次预览，也不支持按历史日期回放。成功响应包含 `status: "sent"`、`message_id`、正文和回执/历史写入状态；`receipt_persisted` 或 `history_recorded` 为 `false` 时表示消息已发送但本地记录不完整，应查看日志，避免直接重试。
+
+同一群的定时和手动任务共用执行锁，正在生成时返回 `409`。发送成功后，在 `LLM_CHAT_STATE_DIR/daily_digest_receipts/<群号>.json` 保存按配置时区计算的当日回执；当天已经发送则返回 `status: "already_sent"`，不会再次生成或发送。也会检查现有聊天记录中当天的日报。确实要重复发送时，显式传 `"send":true,"force":true`。
+
+未启用的群返回 `404`；发送时没有 OneBot 连接返回 `503`；生成或发送异常返回 `502`。运维代理等待上限为 180 秒；超时返回 `504` 时任务可能仍在执行，需要先检查日志和群消息。
+
+NoneBot 内部入口为 `/internal/ops/daily-digest`，同样验证运维 Token，直接从仓库根目录 `.ops-api.env` 读取。手动入口生效需要重启 NoneBot 和运维服务；`misfire_grace_time` 仍不提供跨进程重启后的自动补发。
 
 ## 更新模型路由
 

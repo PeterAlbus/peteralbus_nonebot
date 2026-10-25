@@ -136,12 +136,20 @@ def test_ark_routes_support_tools_and_json(model, thinking_disabled, tmp_path):
         {"type": "json_object"},
         False,
     )
+    agent_request = provider._build_request(
+        resolved_model, provider_config, model_config,
+        [{"role": "user", "content": "搜索"}], [tool], "auto", None, True,
+    )
 
     assert provider_config["base_url"] == "https://ark.cn-beijing.volces.com/api/v3"
     assert provider_config["api_key_field"] == "llm_chat_ark_api_key"
     assert provider_config["api"] == "responses"
     assert model_config["supports_image_understanding"] is True
     assert tool_request["tools"] == [{"type": "function", **tool["function"]}]
+    assert agent_request["tools"] == [
+        {"type": "web_search", "max_keyword": 2},
+        {"type": "function", **tool["function"]},
+    ]
     assert tool_request["tool_choice"] == "auto"
     assert tool_request["input"] == [{"role": "user", "content": "调用工具"}]
     assert tool_request["max_output_tokens"] == 1000

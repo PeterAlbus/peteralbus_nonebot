@@ -12,7 +12,11 @@
       "api_key_field": "llm_chat_ark_api_key",
       "use_system_proxy": false,
       "supports_tools": true,
-      "supports_strict_tools": true
+      "supports_strict_tools": true,
+      "create_params": {
+        "tools": [{"type": "web_search", "max_keyword": 2}],
+        "tool_choice": "auto"
+      }
     },
     "xiaomi_mimo": {
       "base_url": "https://api.xiaomimimo.com/v1",

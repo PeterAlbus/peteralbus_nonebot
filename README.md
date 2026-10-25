@@ -22,6 +22,8 @@ nb run
 
 火山方舟 provider 配置 `"api": "responses"`，使用 `https://ark.cn-beijing.volces.com/api/v3/responses`。provider 将本地消息、图片、函数调用和工具结果转换为 Responses 格式，JSON 输出使用 `text.format`，工具后续请求完整回传上轮输出（包括思考内容和内置工具条目）。请求默认设置 `store: false`，上下文继续由本地管理。原始日志和 Token 用量统计同时兼容 Responses 和 Chat Completions；其他 provider 默认使用 Chat Completions。模型路由在启动时加载，修改后需要重启机器人。上述模型使用普通方舟 API 地址。
 
+火山常规聊天默认提供 `web_search`，由模型按需搜索，每轮搜索最多 2 个关键词；需要在方舟侧开通联网内容插件。网页和文档链接由 `read_urls` 工具通过方舟 `/api/v3/tools/execute` 的 LinkReader 解析，一次最多 3 个公开 HTTP(S) 链接，复用当前路由的 Ark API Key 和代理设置。网页解析也需在方舟侧开通；正文过长时逐页截断并标记，失败页面返回明确错误。两项能力均不需要额外 AK/SK，日报和记忆维护请求不提供这些工具。参考[联网搜索](https://docs.volcengine.com/docs/ark/web-search?lang=zh)和[网页解析](https://docs.volcengine.com/docs/ark/webpage-parsing-plugin-guide?lang=zh)。
+
 模型路由中的 `use_system_proxy` 可控制单个提供商是否使用操作系统代理；MiMo 和火山方舟配置为 `false`，直接连接其 API。其他提供商未设置时保持 HTTP 客户端默认行为。
 
 `peteralbus_wife` 的路径支持绝对路径和 `~`，相对路径以该插件目录为基准。JM 的任务根目录由 `PETERALBUS_WIFE_JM_WORK_DIR` 指定，`config.json` 维护下载规则。图片资源需要事先准备；JM 工作目录会自动创建。
@@ -176,6 +178,8 @@ def register_tools(registry: ToolRegistry) -> None:
 代码先按固定时间窗口、类别和关键词过滤并去重，再通过一次不带任何工具的模型请求完成候选选择、翻译和摘要。模型只能返回代码提供的候选 `item_id`，发送层根据 `item_id` 拼接真实来源链接。AI 资讯最多一条；日报正文最多七条，并受配置中的字符上限约束。
 
 日报发送成功后以 `source="llm:daily_digest"` 写入群聊历史，和普通模型回复明确区分。
+
+模型生成的日报 JSON 忽略顶层和条目中的额外字段（例如 `type`），仍要求 `items` 数组和有效的 `item_id`、摘要正文，并校验长度、候选来源、重复项和各分类数量。配置文件继续拒绝未知字段。手动预览及补发通过运维 API `POST /api/v1/nonebot/daily-digest` 调用，默认仅预览，显式设置 `send: true` 才发送；当天已发送时默认跳过，详见[手动日报接口](docs/ops-api.md#手动预览与补发日报)。
 
 ## 测试
 

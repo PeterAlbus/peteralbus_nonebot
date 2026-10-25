@@ -419,7 +419,7 @@ async def test_passive_reply_builds_context_and_runs_agent_once(monkeypatch) -> 
 
 @pytest.mark.asyncio
 async def test_daily_digest_is_sent_only_to_configured_group_and_recorded(
-    monkeypatch,
+    monkeypatch, tmp_path,
 ) -> None:
     nonebot.init()
     handler = importlib.import_module("multi_llm_chat.handler")
@@ -441,18 +441,24 @@ async def test_daily_digest_is_sent_only_to_configured_group_and_recorded(
             return "今日日报"
 
     class FakeConversationStore:
+        async def get(self, group_id):
+            return ConversationState(group_id=group_id)
+
         async def append(self, event):
             stored_events.append(event)
             return ConversationState(group_id=event.group_id, recent_events=[event])
 
     bot = FakeBot()
     monkeypatch.setattr(handler, "get_bot", lambda: bot)
+    monkeypatch.setattr(handler, "state_dir", tmp_path)
+    monkeypatch.setattr(handler, "_daily_digest_locks", {})
     monkeypatch.setattr(handler, "daily_digest_service", FakeDigestService())
     monkeypatch.setattr(handler, "conversation_store", FakeConversationStore())
     monkeypatch.setattr(
         handler,
         "daily_digest_config",
         SimpleNamespace(
+            timezone="Asia/Shanghai",
             groups=[
                 SimpleNamespace(
                     group_id="748245950",

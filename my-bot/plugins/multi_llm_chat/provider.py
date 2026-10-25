@@ -8,7 +8,7 @@ from time import perf_counter
 from typing import Any
 from uuid import uuid4
 
-from openai import AsyncOpenAI, DefaultAsyncHttpxClient
+from openai import APIStatusError, AsyncOpenAI, DefaultAsyncHttpxClient
 
 from llm_accounts import ProviderAccounts
 from llm_usage import UsageStore
@@ -126,6 +126,61 @@ class LLMProvider:
             volc_secret_key=volc_secret_key,
         )
         return {"model": model, **await accounts.balance(provider_name)}
+
+    async def read_urls(self, url_list: list[str]) -> dict[str, Any]:
+        _, provider_config, model_config = self._resolve_model()
+        if model_config["provider"] != "volc_ark":
+            raise ProviderConfigurationError("当前提供商未配置火山网页解析")
+        # Same endpoint and body as Arkitect's built-in LinkReader. Reuse the
+        # loaded route's credentials and proxy settings without the Arkitect runtime.
+        client = self._client_for(provider_config).with_options(max_retries=0)
+        try:
+            result = await client.post(
+                "/tools/execute",
+                cast_to=dict[str, Any],
+                body={
+                    "action_name": "LinkReader",
+                    "tool_name": "LinkReader",
+                    "parameters": {"url_list": url_list},
+                },
+            )
+        except APIStatusError as error:
+            body = error.body if isinstance(error.body, dict) else {}
+            details = body.get("error", body)
+            details = details if isinstance(details, dict) else {}
+            if "security strategy" in str(details.get("message", "")).lower():
+                reason = "链接被火山网页解析安全策略拦截，未获取正文；不要重复请求该链接"
+            else:
+                reason = f"火山网页解析请求失败（HTTP {error.status_code}），未获取正文"
+            raise ProviderResponseError(reason) from error
+        data = result.get("data")
+        if result.get("status_code") != 200 or not isinstance(data, dict):
+            raise ProviderResponseError("火山网页解析接口返回失败状态")
+        records = data.get("ark_web_data_list")
+        if not isinstance(records, list) or not records:
+            raise ProviderResponseError("火山网页解析接口未返回网页结果")
+        if len(records) != len(url_list) or any(not isinstance(page, dict) for page in records):
+            raise ProviderResponseError("火山网页解析接口返回无效网页结果")
+        # Leave room for titles, URLs and the tool-result envelope. Truncate each
+        # page's body rather than cutting the whole serialized result mid-document.
+        budget = max(100, self._config.llm_chat_tool_output_max_chars - 2000)
+        page_limit = max(1, budget // len(records))
+        pages = []
+        for index, page in enumerate(records):
+            error_code = page.get("error_code")
+            error = str(page.get("error_message") or "")
+            if error_code not in (None, "", 0, "0") and not error:
+                error = f"网页解析失败: {error_code}"
+            content = str(page.get("content") or "") if not error else ""
+            pages.append({
+                "url": str(page.get("url") or url_list[index]),
+                "title": str(page.get("title") or "")[:300],
+                "success": bool(content) and not error,
+                "content": content[:page_limit],
+                "truncated": len(content) > page_limit,
+                "error": error or ("" if content else "网页解析未返回正文"),
+            })
+        return {"pages": pages}
 
     def image_understanding_enabled(self) -> bool:
         _, _, model_config = self._resolve_model()

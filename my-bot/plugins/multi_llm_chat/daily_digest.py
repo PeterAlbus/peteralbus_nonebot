@@ -187,6 +187,8 @@ class DigestItem(DigestModel):
 
 
 class SelectedDigestItem(DigestModel):
+    model_config = ConfigDict(extra="ignore")
+
     item_id: str
     text: str = Field(min_length=1, max_length=180)
 
@@ -200,7 +202,16 @@ class SelectedDigestItem(DigestModel):
 
 
 class DigestSelection(DigestModel):
-    items: list[SelectedDigestItem] = Field(default_factory=list)
+    # LLM JSON mode guarantees valid JSON, not an exact schema. Ignore harmless
+    # metadata while still requiring the business payload and validating each item.
+    model_config = ConfigDict(extra="ignore")
+    items: list[SelectedDigestItem]
+
+
+class DailyDigestReceipt(DigestModel):
+    date: str = ""
+    message_id: str = ""
+    sent_at: datetime | None = None
 
 
 @dataclass(frozen=True)
@@ -629,7 +640,8 @@ class DailyDigestService:
                     "content": (
                         "你负责从工程代码提供的结构化候选中编辑一份短日报。"
                         "只能选择候选 item_id，不能编造事实、来源或链接。"
-                        "严格输出 JSON 对象。"
+                        "只输出包含 items 数组的 JSON 对象；"
+                        "每个条目只包含 item_id 和 text，不要添加 type 等格式元数据。"
                     ),
                 },
                 {
