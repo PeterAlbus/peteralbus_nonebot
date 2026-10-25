@@ -236,7 +236,18 @@ class JsonNewsSource:
     source_name: str
     category: Literal["game", "policy"]
     url: str
-    parser: Literal["mihoyo", "valorant_cn", "china_policy"]
+    parser: Literal["mihoyo", "valorant_cn", "tencent_cmc", "china_policy"]
+    detail_url: str
+    video_detail_url: str = ""
+
+
+@dataclass(frozen=True)
+class EsportsSource:
+    source_id: str
+    source_name: str
+    game_name: str
+    url: str
+    parser: Literal["league_cn", "valorant_cn"]
     detail_url: str
 
 
@@ -309,6 +320,16 @@ FEED_SOURCES: tuple[FeedSource, ...] = (
 
 JSON_NEWS_SOURCES: tuple[JsonNewsSource, ...] = (
     JsonNewsSource(
+        "league_cn",
+        "英雄联盟国服官方",
+        "game",
+        "https://apps.game.qq.com/cmc/zmMcnTargetContentList?"
+        "page=1&num=30&target=23&source=web_pc",
+        "tencent_cmc",
+        "https://lol.qq.com/news/detail.shtml?docid={id}",
+        "https://lol.qq.com/v/v2/detail.shtml?docid={id}",
+    ),
+    JsonNewsSource(
         "valorant_cn",
         "无畏契约国服",
         "game",
@@ -348,18 +369,33 @@ JSON_NEWS_SOURCES: tuple[JsonNewsSource, ...] = (
 )
 
 
+ESPORTS_SOURCES: tuple[EsportsSource, ...] = (
+    EsportsSource(
+        "league_esports_cn",
+        "英雄联盟赛事官网",
+        "英雄联盟",
+        "https://lpl.qq.com/web201612/data/LOL_MATCH2_MATCH_HOMEPAGE_BMATCH_LIST.js",
+        "league_cn",
+        "https://lpl.qq.com/web202301/stats.shtml?bmid={match_id}",
+    ),
+    EsportsSource(
+        "valorant_esports_cn",
+        "无畏契约赛事官网",
+        "无畏契约",
+        "https://val.native.game.qq.com/esports/v1/data/VAL_Match_day3.json",
+        "valorant_cn",
+        "https://vct.qq.com/match-data.html?gameId={game_id}&matchId={match_id}"
+        "&teamAId={team_a_id}&teamBId={team_b_id}",
+    ),
+)
+
+
 HTML_SOURCES: tuple[HtmlSource, ...] = (
     HtmlSource(
         "valorant_riot",
         "VALORANT 官方",
         "game",
         "https://playvalorant.com/zh-tw/news/",
-    ),
-    HtmlSource(
-        "league_riot",
-        "英雄联盟官方",
-        "game",
-        "https://www.leagueoflegends.com/zh-tw/news/",
     ),
     HtmlSource("wow_cn", "魔兽世界国服", "game", "https://wow.blizzard.cn/news/"),
     HtmlSource(
@@ -450,6 +486,10 @@ class DailyDigestService:
             source_tasks.extend(
                 asyncio.create_task(self._collect_json_news_safely(session, source))
                 for source in JSON_NEWS_SOURCES
+            )
+            source_tasks.extend(
+                asyncio.create_task(self._collect_esports_safely(session, source))
+                for source in ESPORTS_SOURCES
             )
             source_tasks.append(
                 asyncio.create_task(self._collect_anilist_safely(session, current))
@@ -571,6 +611,25 @@ class DailyDigestService:
                 source_name=source.source_name,
             )
 
+    async def _collect_esports_safely(
+        self,
+        session: aiohttp.ClientSession,
+        source: EsportsSource,
+    ) -> SourceResult:
+        try:
+            body = await _fetch_bytes(session, source.url)
+            return SourceResult(
+                source_id=source.source_id,
+                source_name=source.source_name,
+                items=parse_esports_items(source, json.loads(body), self._timezone),
+            )
+        except Exception as error:  # noqa: BLE001 - isolate independent source failure
+            self._log_source_error(source.source_id, source.source_name, error)
+            return SourceResult(
+                source_id=source.source_id,
+                source_name=source.source_name,
+            )
+
     def _log_source_error(
         self,
         source_id: str,
@@ -623,6 +682,7 @@ class DailyDigestService:
                 "每个 item_id 最多选择一次，不得重复选择",
                 "AI 最多一条；没有重要更新时不要选择 AI 条目",
                 "游戏优先版本、维护、赛季、重要活动和重大赛事",
+                "赛果只能依据候选中的已结束比赛和系列赛总比分，不推断晋级、淘汰或冠军",
                 "政策只选择对普通上班族有明确实际影响的内容",
                 "text 使用自然简洁的中文，说明发生了什么以及为什么值得关注",
                 "不要在 text 中重复来源名称、日期或 URL",
@@ -804,12 +864,19 @@ def parse_json_news_items(
                 )
             )
         return parsed
-    if source.parser == "valorant_cn":
+    if source.parser in {"valorant_cn", "tencent_cmc"}:
+        # The target-content API uses 1 for success; CMC cross uses 0.
+        success_status = "1" if source.parser == "tencent_cmc" else "0"
+        if not isinstance(data, dict) or str(data.get("status")) != success_status:
+            raise ValueError("腾讯新闻接口返回错误")
+        payload = data.get("data")
         records = (
-            data.get("data", {}).get("items", []) if isinstance(data, dict) else []
+            payload.get("items", payload.get("result"))
+            if isinstance(payload, dict)
+            else None
         )
         if not isinstance(records, list):
-            raise TypeError("无畏契约内容接口缺少 data.items")
+            raise TypeError("腾讯新闻接口缺少 data.items/data.result")
         parsed = []
         for record in records[:30]:
             if not isinstance(record, dict):
@@ -822,6 +889,16 @@ def parse_json_news_items(
             )
             if not document_id or not title or published_at is None:
                 continue
+            fallback = (
+                source.video_detail_url
+                if source.video_detail_url and record.get("sVID")
+                else source.detail_url
+            ).format(id=document_id)
+            redirect_url = urljoin(fallback, str(record.get("sRedirectURL") or ""))
+            redirect = urlparse(redirect_url)
+            official_redirect = redirect.scheme in {"http", "https"} and (
+                redirect.hostname or ""
+            ).endswith(".qq.com")
             parsed.append(
                 _make_item(
                     category=source.category,
@@ -830,10 +907,11 @@ def parse_json_news_items(
                     title=title,
                     summary=_clean_text(str(record.get("sDesc", ""))),
                     published_at=published_at,
-                    url=source.detail_url.format(id=document_id),
+                    url=redirect_url if official_redirect else fallback,
                 )
             )
         return parsed
+
     if source.parser == "china_policy":
         if not isinstance(data, list):
             raise TypeError("中国政府网政策接口响应不是数组")
@@ -859,6 +937,116 @@ def parse_json_news_items(
             )
         return parsed
     raise ValueError(f"未知 JSON 新闻解析器: {source.parser}")
+
+
+def parse_esports_items(
+    source: EsportsSource,
+    data: Any,
+    timezone: ZoneInfo,
+) -> list[DigestItem]:
+    if not isinstance(data, dict) or str(data.get("status")) != "0":
+        raise ValueError("赛事接口返回错误")
+    records = data.get("msg")
+    if not isinstance(records, list):
+        raise TypeError("赛事接口缺少 msg 数组")
+    items = []
+    for record in records:
+        if not isinstance(record, dict):
+            continue
+        if source.parser == "league_cn":
+            if (
+                str(record.get("MatchStatus")) != "3"
+                or str(record.get("isTft", "0")) != "0"
+            ):
+                continue
+            match_id = str(record.get("bMatchId") or "")
+            # Some rows omit TeamShortNameA/B; the official display name still
+            # contains both teams, so no second team-directory request is needed.
+            names = re.split(
+                r"\s+vs\.?\s+", str(record.get("bMatchName") or ""), flags=re.IGNORECASE
+            )
+            team_a = str(
+                record.get("TeamShortNameA") or (names[0] if len(names) == 2 else "")
+            )
+            team_b = str(
+                record.get("TeamShortNameB") or (names[1] if len(names) == 2 else "")
+            )
+            score_a, score_b = record.get("ScoreA"), record.get("ScoreB")
+            tournament = str(record.get("GameName") or "")
+            stage = " / ".join(
+                str(record[key])
+                for key in ("GameTypeName", "GameProcName")
+                if record.get(key)
+            )
+            match_format = str(record.get("GameModeName") or "")
+            raw_date = record.get("MatchDate")
+            url = source.detail_url.format(match_id=match_id)
+        elif source.parser == "valorant_cn":
+            if str(record.get("matchStatusId")) != "3":
+                continue
+            match_id = str(record.get("bMatchId") or "")
+            teams = [record.get("teamA"), record.get("teamB")]
+            if not all(isinstance(team, dict) for team in teams):
+                continue
+            team_a, team_b = (
+                str(
+                    team.get("teamSpName")
+                    or team.get("teamShortName")
+                    or team.get("teamName")
+                    or ""
+                )
+                for team in teams
+            )
+            score_a, score_b = record.get("scoreA"), record.get("scoreB")
+            tournament = str(record.get("secondLevelGameName") or "")
+            stage = str(record.get("bMatchName") or record.get("matchType") or "")
+            match_format = str(record.get("matchFormat") or "")
+            raw_date = record.get("matchDate")
+            identifiers = [
+                record.get(key) for key in ("secondLevelGameId", "teamAId", "teamBId")
+            ]
+            if not all(str(value or "").isdigit() for value in identifiers):
+                continue
+            url = source.detail_url.format(
+                match_id=match_id,
+                game_id=identifiers[0],
+                team_a_id=identifiers[1],
+                team_b_id=identifiers[2],
+            )
+        else:
+            raise ValueError(f"未知赛事解析器: {source.parser}")
+        published_at = _parse_datetime(raw_date, timezone)
+        team_a, team_b = _clean_text(team_a), _clean_text(team_b)
+        if (
+            not match_id.isdigit()
+            or not tournament.strip()
+            or published_at is None
+            or not team_a
+            or not team_b
+            or team_a.upper() == "TBD"
+            or team_b.upper() == "TBD"
+            or any(
+                isinstance(score, bool) or not str(score).isdigit()
+                for score in (score_a, score_b)
+            )
+            or int(score_a) == int(score_b)
+        ):
+            continue
+        result = f"{team_a} {int(score_a)}:{int(score_b)} {team_b}"
+        items.append(
+            _make_item(
+                category="game",
+                source_id=source.source_id,
+                source_name=source.source_name,
+                title=f"{source.game_name}｜{_clean_text(tournament)}：{result}",
+                summary=f"比赛已结束，系列赛总比分：{result}。{_clean_text(stage)} {match_format}。"
+                "时间为官方标注的开赛时间，非结束时间。",
+                published_at=published_at,
+                url=url,
+            )
+        )
+    # The LPL feed includes multiple seasons and is not ordered newest first.
+    return sorted(items, key=lambda item: item.published_at, reverse=True)[:30]
 
 
 def parse_html_items(
