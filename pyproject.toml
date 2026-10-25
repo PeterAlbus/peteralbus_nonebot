@@ -25,7 +25,7 @@ dependencies = [
     "nonebot-plugin-orm[default]==0.8.3",
     "nonebot-plugin-status==0.9.0",
     "nonebot-plugin-whateat-pic==1.5.9",
-    "openai>=1.0,<3",
+    "openai>=1.66,<3",
     "pydantic>=2.7,<3"
 ]
 

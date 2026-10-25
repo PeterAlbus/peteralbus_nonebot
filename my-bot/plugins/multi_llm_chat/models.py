@@ -199,6 +199,7 @@ class AssistantTurn(StrictModel):
     encrypted_content: str = ""
     finish_reason: str = ""
     usage: Dict[str, Any] = Field(default_factory=dict)
+    response_output: list[dict[str, Any]] = Field(default_factory=list)
 
     def as_message(self) -> Dict[str, Any]:
         message: Dict[str, Any] = {
@@ -206,6 +207,10 @@ class AssistantTurn(StrictModel):
             "content": self.content or None,
         }
         if self.tool_calls:
+            if self.response_output:
+                # Keep the complete Responses output, including reasoning and built-in
+                # tool items, for the next request in this agent run.
+                message["_responses_output"] = self.response_output
             if self.encrypted_content:
                 message["encrypted_content"] = self.encrypted_content
             elif self.reasoning_content:

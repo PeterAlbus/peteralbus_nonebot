@@ -466,11 +466,22 @@ class DailyDigestService:
         session: aiohttp.ClientSession,
         group: DailyDigestGroup,
     ) -> WeatherReport | None:
-        try:
-            return await collect_weather(session, group, self._timezone)
-        except Exception as error:  # noqa: BLE001 - isolate independent source failure
-            self._log_source_error("open_meteo", "Open-Meteo", error)
-            return None
+        for attempt in range(2):
+            try:
+                return await collect_weather(session, group, self._timezone)
+            except Exception as error:  # noqa: BLE001 - isolate independent source failure
+                self._log_source_error("open_meteo", "Open-Meteo", error)
+                retryable = isinstance(
+                    error,
+                    (aiohttp.ClientConnectionError, aiohttp.ClientPayloadError, asyncio.TimeoutError),
+                ) or (
+                    isinstance(error, aiohttp.ClientResponseError)
+                    and (error.status in {408, 429} or 500 <= error.status < 600)
+                )
+                if attempt == 1 or not retryable:
+                    return None
+                await asyncio.sleep(1)
+        return None
 
     async def _collect_feed_safely(
         self,

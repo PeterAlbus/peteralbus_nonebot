@@ -139,10 +139,17 @@ def test_ark_routes_support_tools_and_json(model, thinking_disabled, tmp_path):
 
     assert provider_config["base_url"] == "https://ark.cn-beijing.volces.com/api/v3"
     assert provider_config["api_key_field"] == "llm_chat_ark_api_key"
+    assert provider_config["api"] == "responses"
     assert model_config["supports_image_understanding"] is True
-    assert tool_request["tools"] == [tool]
+    assert tool_request["tools"] == [{"type": "function", **tool["function"]}]
     assert tool_request["tool_choice"] == "auto"
-    assert json_request["response_format"] == {"type": "json_object"}
+    assert tool_request["input"] == [{"role": "user", "content": "调用工具"}]
+    assert tool_request["max_output_tokens"] == 1000
+    assert tool_request["store"] is False
+    assert "messages" not in tool_request
+    assert "max_tokens" not in tool_request
+    assert json_request["text"]["format"] == {"type": "json_object"}
+    assert "response_format" not in json_request
     assert "tools" not in json_request
     assert (
         tool_request.get("extra_body", {}).get("thinking", {}).get("type")

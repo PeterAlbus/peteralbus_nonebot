@@ -18,7 +18,9 @@ nb run
 
 启动前填写 `.env` 中的群白名单、当前模型对应的 API Key、OneBot 连接配置，以及 `PETERALBUS_WIFE_RES`、`PETERALBUS_WIFE_JM_WORK_DIR`、`WHATPIC_RES_PATH` 三个资源/工作目录。模型与提供商映射位于 `my-bot/plugins/multi_llm_chat/model_routes.json`。
 
-使用火山方舟时，填写 `LLM_CHAT_ARK_API_KEY`，并将 `LLM_CHAT_MODEL` 设置为路由文件中的 `doubao-seed-2-1-lite-260915`、`doubao-seed-2-1-turbo-260628`、`deepseek-v4-1-flash-260910` 或 `glm-5-3-flash-260828`。前三个模型默认关闭深度思考；`glm-5-3-flash-260828` 始终开启深度思考，工具调用后会回传模型返回的思考内容。模型路由在启动时加载，修改后需要重启机器人。上述模型使用普通方舟 API 的 OpenAI 兼容地址，不使用 Agent Plan 的专用地址。
+使用火山方舟时，填写 `LLM_CHAT_ARK_API_KEY`，并将 `LLM_CHAT_MODEL` 设置为路由文件中已开通的方舟模型，例如 `doubao-seed-2-1-lite-260915`、`doubao-seed-2-1-turbo-260628`、`deepseek-v4-1-flash-261017` 或 `glm-5-3-flash-260828`。豆包和 DeepSeek 默认关闭深度思考；GLM 使用模型默认思考模式。
+
+火山方舟 provider 配置 `"api": "responses"`，使用 `https://ark.cn-beijing.volces.com/api/v3/responses`。provider 将本地消息、图片、函数调用和工具结果转换为 Responses 格式，JSON 输出使用 `text.format`，工具后续请求完整回传上轮输出（包括思考内容和内置工具条目）。请求默认设置 `store: false`，上下文继续由本地管理。原始日志和 Token 用量统计同时兼容 Responses 和 Chat Completions；其他 provider 默认使用 Chat Completions。模型路由在启动时加载，修改后需要重启机器人。上述模型使用普通方舟 API 地址。
 
 模型路由中的 `use_system_proxy` 可控制单个提供商是否使用操作系统代理；MiMo 和火山方舟配置为 `false`，直接连接其 API。其他提供商未设置时保持 HTTP 客户端默认行为。
 
@@ -169,7 +171,7 @@ def register_tools(registry: ToolRegistry) -> None:
 
 `multi_llm_chat` 每天按 `Asia/Shanghai` 时区在 10:00 生成一次群聊日报，只发送给 `my-bot/plugins/multi_llm_chat/daily_digest_config.json` 中显式启用的群。当前配置的目标群为 `748245950`。
 
-日报标题固定为“今日日报”。日报直接读取公开来源自身提供的 JSON API、RSS/Atom 或新闻列表页，包括 Open-Meteo、AniList、各游戏官网、PC Gamer、Gematsu、新华网、中国政府网、上海市政府，以及 OpenAI、Google AI、Google DeepMind、Hugging Face 和 Anthropic。单个来源请求或解析失败不会阻止已经获取的内容进入日报，失败详情只写入应用日志，不出现在群聊正文中；天气源失败时省略天气段落。
+日报标题固定为“今日日报”。日报直接读取公开来源自身提供的 JSON API、RSS/Atom 或新闻列表页，包括 Open-Meteo、AniList、各游戏官网、PC Gamer、Gematsu、新华网、中国政府网、上海市政府，以及 OpenAI、Google AI、Google DeepMind、Hugging Face 和 Anthropic。单个来源请求或解析失败不会阻止已经获取的内容进入日报，失败详情只写入应用日志，不出现在群聊正文中。天气请求遇到连接或响应读取失败、超时、HTTP 408/429/5xx 时，等待 1 秒重试一次；最终失败时省略天气段落，其他 HTTP 错误和数据解析错误不重试。
 
 代码先按固定时间窗口、类别和关键词过滤并去重，再通过一次不带任何工具的模型请求完成候选选择、翻译和摘要。模型只能返回代码提供的候选 `item_id`，发送层根据 `item_id` 拼接真实来源链接。AI 资讯最多一条；日报正文最多七条，并受配置中的字符上限约束。
 

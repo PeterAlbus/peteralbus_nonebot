@@ -20,6 +20,7 @@ from .raw_request_store import (
     append_raw_request,
     append_raw_response,
 )
+from .responses_api import build_responses_request, parse_responses_result
 
 UPSTREAM_BLOCKED_CONTENT = (
     "The request was rejected because it was considered high risk"
@@ -78,6 +79,10 @@ class LLMProvider:
             raise ProviderConfigurationError(
                 f"当前提供商不支持工具调用: {provider_name}"
             )
+        if provider_config.get("api", "chat_completions") not in {
+            "chat_completions", "responses"
+        }:
+            raise ProviderConfigurationError("提供商 api 必须为 chat_completions 或 responses")
         return model, provider_config, model_config
 
     def _client_for(self, provider_config: dict[str, Any]) -> AsyncOpenAI:
@@ -159,6 +164,7 @@ class LLMProvider:
             "step": step,
             "model": model,
             "provider": model_config["provider"],
+            "api": provider_config.get("api", "chat_completions"),
         }
         max_attempts = UPSTREAM_BLOCK_MAX_RETRIES + 1
         for attempt in range(1, max_attempts + 1):
@@ -231,10 +237,18 @@ class LLMProvider:
         )
         raw_response = None
         try:
-            raw_response = await client.chat.completions.with_raw_response.create(
-                **create_kwargs
+            endpoint = (
+                client.responses
+                if common_metadata["api"] == "responses"
+                else client.chat.completions
             )
+            raw_response = await endpoint.with_raw_response.create(**create_kwargs)
             result = raw_response.parse()
+            parsed_turn = (
+                parse_responses_result(result)
+                if common_metadata["api"] == "responses"
+                else _parse_chat_completion(result)
+            )
         except Exception as error:
             await asyncio.to_thread(
                 self._usage_store.finish, request_id, attempt, {}, "error",
@@ -285,15 +299,14 @@ class LLMProvider:
             )
             raise
 
-        usage = result.usage.model_dump() if result.usage else {}
+        usage = parsed_turn.usage
         await asyncio.to_thread(
             self._usage_store.finish, request_id, attempt, usage, "completed",
             int(getattr(raw_response, "retries_taken", 0) or 0),
         )
-        choice = result.choices[0]
-        message = choice.message
-        raw_content = message.content or ""
-        finish_reason = str(choice.finish_reason or "")
+        raw_content = parsed_turn.content
+        finish_reason = parsed_turn.finish_reason
+        tool_calls = parsed_turn.tool_calls
         upstream_blocked = raw_content == UPSTREAM_BLOCKED_CONTENT
         retry_scheduled = upstream_blocked and attempt < max_attempts
         embedded_reasoning_removed = False
@@ -302,25 +315,20 @@ class LLMProvider:
             content = "" if retry_scheduled else UPSTREAM_BLOCKED_NOTICE
         else:
             try:
+                if common_metadata["api"] == "responses" and finish_reason not in {
+                    "stop", "tool_calls"
+                }:
+                    raise ProviderResponseError(
+                        f"模型响应未正常结束: finish_reason={finish_reason}"
+                    )
                 content, embedded_reasoning_removed = normalize_outbound_content(
                     raw_content
                 )
-                if request_type.endswith("_chat_agent") and not message.tool_calls:
+                if request_type.endswith("_chat_agent") and not tool_calls:
                     validate_chat_outbound_content(content, finish_reason)
             except ProviderResponseError as error:
                 content = ""
                 output_rejection = str(error)
-        tool_calls = [
-            ToolCall(
-                id=call.id,
-                function=FunctionCall(
-                    name=call.function.name,
-                    arguments=call.function.arguments,
-                ),
-            )
-            for call in (message.tool_calls or [])
-            if getattr(call, "type", "function") == "function"
-        ]
         attempt_elapsed_ms = round((perf_counter() - attempt_started_at) * 1000)
         total_elapsed_ms = round((perf_counter() - total_started_at) * 1000)
         provider_request_id = str(
@@ -398,14 +406,7 @@ class LLMProvider:
             )
             raise ProviderResponseError(output_rejection)
         return (
-            AssistantTurn(
-                content=content,
-                tool_calls=tool_calls,
-                reasoning_content=str(getattr(message, "reasoning_content", "") or ""),
-                encrypted_content=str(getattr(message, "encrypted_content", "") or ""),
-                finish_reason=finish_reason,
-                usage=usage,
-            ),
+            parsed_turn.model_copy(update={"content": content}),
             upstream_blocked,
         )
 
@@ -472,6 +473,8 @@ class LLMProvider:
                     "frequency_penalty",
                 ):
                     create_kwargs.pop(field, None)
+        if provider_config.get("api") == "responses":
+            return build_responses_request(create_kwargs)
         return create_kwargs
 
 
@@ -556,8 +559,31 @@ def _usage_total(usage: dict[str, Any]) -> Any:
 
 
 def _normalize_base_url(url: str) -> str:
-    normalized = url.strip().removesuffix("/chat/completions")
+    normalized = url.strip().rstrip("/").removesuffix("/chat/completions").removesuffix("/responses")
     return normalized.rstrip("/")
+
+
+def _parse_chat_completion(result: Any) -> AssistantTurn:
+    choice = result.choices[0]
+    message = choice.message
+    return AssistantTurn(
+        content=message.content or "",
+        tool_calls=[
+            ToolCall(
+                id=call.id,
+                function=FunctionCall(
+                    name=call.function.name,
+                    arguments=call.function.arguments,
+                ),
+            )
+            for call in (message.tool_calls or [])
+            if getattr(call, "type", "function") == "function"
+        ],
+        reasoning_content=str(getattr(message, "reasoning_content", "") or ""),
+        encrypted_content=str(getattr(message, "encrypted_content", "") or ""),
+        finish_reason=str(choice.finish_reason or ""),
+        usage=result.usage.model_dump() if result.usage else {},
+    )
 
 
 def _thinking_enabled(create_kwargs: dict[str, Any]) -> bool:

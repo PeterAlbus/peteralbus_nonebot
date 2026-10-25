@@ -1,11 +1,14 @@
 from __future__ import annotations
 
+import asyncio
 import json
 from datetime import datetime, timedelta
 from pathlib import Path
 from types import SimpleNamespace
+from unittest.mock import AsyncMock, Mock
 from zoneinfo import ZoneInfo
 
+import aiohttp
 import pytest
 from multi_llm_chat.daily_digest import (
     DailyDigestConfig,
@@ -30,6 +33,42 @@ from multi_llm_chat.models import AssistantTurn
 
 SHANGHAI = ZoneInfo("Asia/Shanghai")
 NOW = datetime(2026, 8, 25, 10, 0, tzinfo=SHANGHAI)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("error", [
+    asyncio.TimeoutError(),
+    aiohttp.ClientConnectionError("connection reset"),
+    aiohttp.ClientResponseError(SimpleNamespace(real_url="https://api.open-meteo.com/v1/forecast"), (), status=503),
+    aiohttp.ClientResponseError(SimpleNamespace(real_url="https://api.open-meteo.com/v1/forecast"), (), status=429),
+])
+async def test_weather_retries_once_after_transient_error(monkeypatch, error):
+    report = object()
+    collect = AsyncMock(side_effect=[error, report])
+    sleep = AsyncMock()
+    monkeypatch.setattr("multi_llm_chat.daily_digest.collect_weather", collect)
+    monkeypatch.setattr("multi_llm_chat.daily_digest.asyncio.sleep", sleep)
+    service = DailyDigestService(None, DailyDigestConfig(groups=[]), Mock())
+    assert await service._collect_weather_safely(None, None) is report
+    assert collect.await_count == 2
+    sleep.assert_awaited_once_with(1)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("error,count", [
+    (asyncio.TimeoutError(), 2),
+    (aiohttp.ClientResponseError(SimpleNamespace(real_url="https://api.open-meteo.com/v1/forecast"), (), status=400), 1),
+    (ValueError("invalid response"), 1),
+])
+async def test_weather_retry_limit_and_permanent_failures(monkeypatch, error, count):
+    collect = AsyncMock(side_effect=error)
+    sleep = AsyncMock()
+    monkeypatch.setattr("multi_llm_chat.daily_digest.collect_weather", collect)
+    monkeypatch.setattr("multi_llm_chat.daily_digest.asyncio.sleep", sleep)
+    service = DailyDigestService(None, DailyDigestConfig(groups=[]), Mock())
+    assert await service._collect_weather_safely(None, None) is None
+    assert collect.await_count == count
+    assert sleep.await_count == count - 1
 
 
 def make_item(

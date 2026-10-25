@@ -7,6 +7,7 @@
       "supports_strict_tools": true
     },
     "volc_ark": {
+      "api": "responses",
       "base_url": "https://ark.cn-beijing.volces.com/api/v3",
       "api_key_field": "llm_chat_ark_api_key",
       "use_system_proxy": false,
