@@ -28,6 +28,8 @@ nb run
 
 `peteralbus_wife` 的路径支持绝对路径和 `~`，相对路径以该插件目录为基准。JM 的任务根目录由 `PETERALBUS_WIFE_JM_WORK_DIR` 指定，`config.json` 维护下载规则。图片资源需要事先准备；JM 工作目录会自动创建。
 
+JM PDF 上传使用 NapCat `upload_file_stream`：NoneBot 以 256 KiB 分块读取并传输 PDF，NapCat 合并至自身缓存，双方校验文件大小和 SHA-256 后，再调用 `upload_group_file` 上传该缓存路径。复用现有 OneBot 连接，无需新增端口或密钥，也无需 QQ 读取 JM 工作目录。要求 NapCat 支持文件流接口（v4.8.115+）。`PETERALBUS_WIFE_JM_UPLOAD_TIMEOUT` 覆盖缓存传输和群文件上传两个阶段；中断时重置当前流，已完成的远端缓存按上传超时加 60 秒自动过期，本地文件仍按原成功/失败策略清理。
+
 `start.sh` 用于已有 Linux 环境；`start-macos.sh` 从 `.env.macos` 读取 Miniconda 路径，在指定 Conda 环境中前台启动，不启用自动重载。`.env.macos` 从 `.env.macos.example` 复制，具体配置与常驻管理见部署文档。
 
 macOS 主机状态、NoneBot/NapCat 状态与重启可通过独立的本地管理 API 操作，接口定义和 SSH 隧道说明见[运维 API 文档](docs/ops-api.md)。

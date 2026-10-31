@@ -154,6 +154,8 @@ export MEME_HOME="/absolute/path/to/napcat/meme_generator"
 
 JM 的工作目录由 `PETERALBUS_WIFE_JM_WORK_DIR` 指定。每次下载在其中建立独立任务目录，图片和 PDF 均在该任务目录内生成；`config.json` 用于下载参数和目录命名规则。上传成功后任务目录删除，失败任务按 `PETERALBUS_WIFE_JM_FAILED_RETENTION_HOURS` 的配置保留并在后续任务中清理。
 
+PDF 先由 NoneBot 通过现有 OneBot 连接调用 `upload_file_stream`，按 256 KiB 分块传入 NapCat 自身缓存；完成文件大小和 SHA-256 校验后，才将返回的缓存路径交给 `upload_group_file`。NapCat 需要支持文件流接口（v4.8.115+），无需新端口或密钥。`PETERALBUS_WIFE_JM_UPLOAD_TIMEOUT` 包含缓存传输与群文件上传；传输中断会重置本任务流，远端缓存使用独立随机文件名并在配置上传超时加 60 秒后过期，不调用全局临时文件清理接口。
+
 `PETERALBUS_WIFE_JM_ALLOWED_GROUPS` 和 `PETERALBUS_WIFE_JM_ALLOWED_USERS` 默认空列表，分别表示不限制群和用户；配置为非空时，两项限制同时生效。`LLM_CHAT_WHITELIST` 为空则不会处理普通群聊消息。
 
 首次启用表情包插件时，在填写 `.env` 和 `.env.macos` 后、启动 NoneBot 前，初始化统计数据库：
@@ -215,7 +217,7 @@ ws://127.0.0.1:2333/onebot/v11/
 
 端口必须与 `.env` 的 `PORT` 一致，访问令牌必须与 `ONEBOT_ACCESS_TOKEN` 一致。保存并启用配置。NoneBot 尚未启动时出现连接重试，启动后应恢复连接。连接协议详见 [NoneBot OneBot 配置文档](https://onebot.adapters.nonebot.dev/docs/guide/setup/)。
 
-当前图片发送和 JM 群文件上传都使用本地文件路径。此部署方式要求路径在 NoneBot 与 NapCat 进程中指向同一个文件；验收时需实测图片发送和 PDF 上传。Mac 上的容器部署不在本文范围内。
+老婆图片发送使用本地文件路径，要求路径在 NoneBot 与 NapCat 进程中指向同一个文件。JM 群文件上传通过文件流先将 PDF 传入 NapCat 缓存，不要求 QQ 读取 NoneBot 的 JM 工作目录；可避免 macOS 沙箱拒绝读取该目录的问题。验收时需实测图片发送和 PDF 上传。Mac 上的容器部署不在本文范围内。
 
 ## 6. 前台启动与功能验收
 
@@ -327,7 +329,7 @@ LaunchAgent 依赖用户登录会话，退出登录后不会继续运行。需�
 | 普通群聊没有响应 | 检查 `LLM_CHAT_WHITELIST`、模型名称、对应提供商 API Key；被动消息也可能由模型决定不回复 |
 | 老婆图片报目录错误 | 检查 `PETERALBUS_WIFE_RES`、五个指定角色目录及图片文件；NapCat 也需要能够读取图片 |
 | 吃什么或菜单找不到图片 | 检查 `WHATPIC_RES_PATH` 内的 `eat_pic`、`drink_pic`，并确认用户有读取权限 |
-| JM 下载成功但上传失败 | 检查 NapCat 是否可读取实际 PDF 路径、群文件权限、上传超时和配置的大小限制；失败文件位于 JM 任务目录 |
+| JM 下载成功但上传失败 | 检查 NapCat 文件流接口、缓存传输校验、群文件权限、上传超时和配置的大小限制；失败文件位于 JM 任务目录 |
 | 机器人没有原有记忆或历史图片无法读取 | 核对 `LLM_CHAT_STATE_DIR` 是否直接包含四个状态子目录，确认 `media` 一并迁移 |
 | 终端能启动，LaunchAgent 启动失败 | 检查 `service_logs/stderr.log`、plist 中的仓库路径、`.env.macos` 和 macOS 对目录的访问权限 |
 | 表情包插件提示数据库未更新到最新迁移 | 停止 NoneBot 服务，按第 3 节执行 `nb orm upgrade heads`，再启动服务 |

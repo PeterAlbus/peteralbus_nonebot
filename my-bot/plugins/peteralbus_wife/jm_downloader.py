@@ -12,6 +12,7 @@ from nonebot.log import logger
 from nonebot.params import CommandArg
 
 from .config import Config, resolve_plugin_path
+from .napcat_file_transfer import upload_group_file_via_napcat
 
 config = get_plugin_config(Config)
 
@@ -166,13 +167,10 @@ async def handle_jm_download(
             if max_pdf_mb and pdf_path.stat().st_size > max_pdf_mb * 1024 * 1024:
                 raise RuntimeError(f"PDF 超过 {max_pdf_mb} MiB 的上传限制")
 
-            await asyncio.wait_for(
-                bot.call_api(
-                    "upload_group_file",
-                    group_id=event.group_id,
-                    file=str(pdf_path),
-                    name=pdf_path.name,
-                ),
+            await upload_group_file_via_napcat(
+                bot,
+                event.group_id,
+                pdf_path,
                 timeout=max(1, config.peteralbus_wife_jm_upload_timeout),
             )
             upload_succeeded = True
