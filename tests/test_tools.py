@@ -1,5 +1,7 @@
+import json
 from datetime import datetime, timezone
 from pathlib import Path
+from unittest.mock import AsyncMock
 
 import pytest
 from multi_llm_chat.conversation import ConversationStore
@@ -17,17 +19,37 @@ from multi_llm_chat.tools import (
     READ_GROUP_IMAGE_TOOL_NAME,
     REPLY_TO_EVENT_TOOL_NAME,
     AgentRunner,
+    ReplyDraft,
     ToolArguments,
     ToolDefinition,
     ToolRegistry,
+    apply_text,
     build_default_tool_registry,
     strict_model_json_schema,
 )
+from nonebot.adapters.onebot.v11 import MessageSegment
 
 
 class AddArguments(ToolArguments):
     left: int
     right: int
+
+
+def tool_call(name, arguments, call_id):
+    return ToolCall(
+        id=call_id,
+        function=FunctionCall(name=name, arguments=json.dumps(arguments)),
+    )
+
+
+def reply_turn(text):
+    return AssistantTurn(
+        content="内部推理：下一步调用 send_reply",
+        tool_calls=[
+            tool_call("add_text", {"text": text}, "text"),
+            tool_call("send_reply", {}, "send"),
+        ],
+    )
 
 
 class FakeProvider:
@@ -48,7 +70,7 @@ class FakeProvider:
                     )
                 ]
             )
-        return AssistantTurn(content="结果是 42")
+        return reply_turn("结果是 42")
 
 
 class FakeCliRunner:
@@ -116,7 +138,8 @@ async def test_agent_executes_registered_tool_and_returns_final_answer(tmp_path)
     )
 
     assert result.action == "reply"
-    assert result.content == "结果是 42"
+    assert all(call["tool_choice"] == "required" for call in provider.calls)
+    assert result.message.extract_plain_text() == "结果是 42"
     assert result.tool_steps == 1
     second_messages = provider.calls[1]["messages"]
     assert second_messages[-2]["role"] == "assistant"
@@ -132,6 +155,84 @@ async def test_agent_executes_registered_tool_and_returns_final_answer(tmp_path)
     assert REPLY_TO_EVENT_TOOL_NAME not in direct_tool_names
     assert MENTION_MEMBERS_TOOL_NAME not in direct_tool_names
     assert provider.calls[0]["request_type"] == "direct_chat_agent"
+
+
+@pytest.mark.asyncio
+async def test_free_text_without_a_reply_action_cannot_be_sent(tmp_path):
+    provider = AsyncMock()
+    provider.complete.return_value = AssistantTurn(content="内部推理：调用 mention_members")
+    runner = make_agent_runner(tmp_path, provider, ToolRegistry(output_max_chars=2000))
+    with pytest.raises(RuntimeError, match="未调用群聊回复工具"):
+        await runner.run(
+            messages=[], turn_id="free-text", group_id="100", triggering_user_id="200",
+            bot=object(), turn_mode="direct", allow_finish_without_reply=False,
+            replyable_event_ids=[], mentionable_user_ids=[], readable_image_refs=[],
+        )
+
+    assert provider.complete.await_count == 2
+
+
+@pytest.mark.asyncio
+async def test_missing_direct_reply_continues_with_context_and_existing_draft(tmp_path):
+    provider = AsyncMock()
+    provider.complete.side_effect = [
+        AssistantTurn(tool_calls=[tool_call("add_text", {"text": "明天见"}, "draft")]),
+        AssistantTurn(content="草稿写好了", reasoning_content="内部判断"),
+        AssistantTurn(tool_calls=[tool_call("send_reply", {}, "send")]),
+    ]
+    runner = make_agent_runner(tmp_path, provider, ToolRegistry(output_max_chars=2000), max_steps=1)
+    messages = [{"role": "user", "content": "@小P 明天见？"}]
+    result = await runner.run(
+        messages=messages, turn_id="direct-followup", group_id="100", triggering_user_id="200",
+        bot=object(), turn_mode="direct", allow_finish_without_reply=False,
+        replyable_event_ids=[], mentionable_user_ids=[], readable_image_refs=[],
+    )
+    requests = [call.kwargs for call in provider.complete.await_args_list]
+    followup = requests[-1]["messages"]
+    assert [r["step"] for r in requests] == [0, 1, 2]
+    assert all(r["turn_id"] == "direct-followup" for r in requests)
+    assert followup[0] == messages[0]
+    assert followup[2]["tool_call_id"] == "draft"
+    assert followup[3]["content"] == "草稿写好了"
+    assert followup[3]["reasoning_content"] == "内部判断"
+    assert followup[-1]["role"] == "system"
+    assert "为什么没有回复" in followup[-1]["content"]
+    assert result.message.extract_plain_text() == "明天见"
+
+
+@pytest.mark.parametrize("text", ["", "字" * 4001, "<think>内部推理</think>回答"])
+def test_add_text_rejects_invalid_body(text):
+    draft = ReplyDraft()
+    assert not json.loads(apply_text(draft, json.dumps({"text": text})))["success"]
+    assert not draft.message
+
+
+@pytest.mark.asyncio
+async def test_ordered_reply_with_inline_mentions_and_cq_codes(tmp_path):
+    provider = AsyncMock()
+    provider.complete.side_effect = [
+        AssistantTurn(tool_calls=[
+            tool_call("add_text", {"text": "请 "}, "a"),
+            tool_call("mention_members", {"user_ids": ["200"]}, "b"),
+        ]),
+        AssistantTurn(content="内部推理", tool_calls=[
+            tool_call("add_text", {"text": " 通知 [CQ:at,qq=all]，谢谢 "}, "c"),
+            tool_call("mention_members", {"user_ids": ["200"]}, "d"),
+            tool_call("add_text", {"text": "！"}, "e"),
+            tool_call("send_reply", {}, "f"),
+        ]),
+    ]
+    runner = make_agent_runner(tmp_path, provider, ToolRegistry(output_max_chars=2000))
+    result = await runner.run(
+        messages=[], turn_id="ordered", group_id="100", triggering_user_id="200",
+        bot=object(), turn_mode="direct", allow_finish_without_reply=False,
+        replyable_event_ids=[], mentionable_user_ids=["200"], readable_image_refs=[],
+    )
+    assert list(result.message) == [
+        MessageSegment.text("请 "), MessageSegment.at("200"),
+        MessageSegment.text(" 通知 "), MessageSegment.at("all"),
+        MessageSegment.text("，谢谢 "), MessageSegment.at("200"), MessageSegment.text("！"),
+    ]
 
 
 class ReadImageProvider:
@@ -152,7 +253,7 @@ class ReadImageProvider:
                     )
                 ]
             )
-        return AssistantTurn(content="看到了")
+        return reply_turn("看到了")
 
 
 @pytest.mark.asyncio
@@ -200,7 +301,7 @@ async def test_agent_reads_only_image_reference_exposed_for_current_turn(tmp_pat
         readable_image_refs=[("image-event", 0)],
     )
 
-    assert result.content == "看到了"
+    assert result.message.extract_plain_text() == "看到了"
     tool_names = {
         tool["function"]["name"]
         for tool in provider.calls[0]["tools"]
@@ -256,7 +357,7 @@ async def test_passive_agent_can_finish_without_reply_in_one_request(tmp_path):
     )
 
     assert result.action == "skip"
-    assert result.content == ""
+    assert result.message.extract_plain_text() == ""
     assert result.skip_reason == "already_answered"
     assert len(provider.calls) == 1
     assert provider.calls[0]["request_type"] == "passive_chat_agent"
@@ -291,7 +392,7 @@ async def test_direct_agent_can_finish_when_trigger_was_already_answered(tmp_pat
     )
 
     assert result.action == "skip"
-    assert result.content == ""
+    assert result.message.extract_plain_text() == ""
     assert result.skip_reason == "already_answered"
     assert len(provider.calls) == 1
     assert provider.calls[0]["request_type"] == "direct_chat_agent"
@@ -349,11 +450,11 @@ class AddressingProvider:
                     ),
                 ]
             )
-        return AssistantTurn(content="我说的是这条消息。")
+        return reply_turn("我说的是这条消息。")
 
 
 @pytest.mark.asyncio
-async def test_addressing_tools_build_draft_before_plain_text_reply(tmp_path):
+async def test_addressing_tools_build_draft_before_send_reply(tmp_path):
     provider = AddressingProvider()
     runner = make_agent_runner(tmp_path, provider, ToolRegistry(output_max_chars=2000))
 
@@ -371,9 +472,12 @@ async def test_addressing_tools_build_draft_before_plain_text_reply(tmp_path):
     )
 
     assert result.action == "reply"
-    assert result.content == "我说的是这条消息。"
+    assert result.message.extract_plain_text() == "我说的是这条消息。"
     assert result.reply_to_event_id == "event-1"
-    assert result.mention_user_ids == ("200", "201")
+    assert list(result.message) == [
+        MessageSegment.at("200"), MessageSegment.at("201"), MessageSegment.at("200"),
+        MessageSegment.text("我说的是这条消息。"),
+    ]
     tool_names = {
         tool["function"]["name"]
         for tool in provider.calls[0]["tools"]
@@ -386,7 +490,7 @@ async def test_addressing_tools_build_draft_before_plain_text_reply(tmp_path):
     assert second_messages[-2]["role"] == "tool"
     assert '"reply_to_event_id": "event-1"' in second_messages[-2]["content"]
     assert second_messages[-1]["role"] == "tool"
-    assert '"mention_user_ids": ["200", "201"]' in second_messages[-1]["content"]
+    assert '"mention_user_ids": ["200", "201", "200"]' in second_messages[-1]["content"]
 
 
 class InvalidAddressingProvider:
@@ -414,7 +518,7 @@ class InvalidAddressingProvider:
                     ),
                 ]
             )
-        return AssistantTurn(content="不带定向格式的回复")
+        return reply_turn("不带定向格式的回复")
 
 
 @pytest.mark.asyncio
@@ -436,7 +540,7 @@ async def test_addressing_tools_reject_targets_outside_current_scope(tmp_path):
     )
 
     assert result.reply_to_event_id is None
-    assert result.mention_user_ids == ()
+    assert list(result.message) == [MessageSegment.text("不带定向格式的回复")]
     second_messages = provider.calls[1]["messages"]
     assert "引用目标不属于当前可回复事件" in second_messages[-2]["content"]
     assert "@目标不是当前群成员: 999" in second_messages[-1]["content"]

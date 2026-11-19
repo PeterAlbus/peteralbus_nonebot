@@ -339,10 +339,9 @@ async def test_passive_reply_builds_context_and_runs_agent_once(monkeypatch) -> 
             agent_calls.append(kwargs)
             return AgentRunResult(
                 action="reply",
-                content="吃面吧",
+                message=Message([MessageSegment.text("午饭 "), MessageSegment.at("10001"), MessageSegment.text(" 吃面吧")]),
                 tool_steps=0,
                 reply_to_event_id=trigger.event_id,
-                mention_user_ids=("10001",),
             )
 
     class FakeProvider:
@@ -397,9 +396,9 @@ async def test_passive_reply_builds_context_and_runs_agent_once(monkeypatch) -> 
     expected_message = Message(
         [
             MessageSegment.reply(123),
+            MessageSegment.text("午饭 "),
             MessageSegment.at("10001"),
-            MessageSegment.text(" "),
-            MessageSegment.text("吃面吧"),
+            MessageSegment.text(" 吃面吧"),
         ]
     )
     assert bot.calls == [
@@ -410,7 +409,7 @@ async def test_passive_reply_builds_context_and_runs_agent_once(monkeypatch) -> 
     ]
     assert len(stored_events) == 1
     assert stored_events[0].source_event_id == trigger.event_id
-    assert stored_events[0].content == "吃面吧"
+    assert stored_events[0].content == "午饭 @用户10001 吃面吧"
     assert stored_events[0].platform_message_id == "456"
     assert stored_events[0].reply_to_event_id == trigger.event_id
     assert stored_events[0].reply_to_message_id == "123"

@@ -432,13 +432,9 @@ async def _run_reply(
             trigger_event.event_id,
         )
         return
-    outgoing_message = _build_outgoing_message(
-        content=result.content,
-        reply_to_event_id=result.reply_to_event_id,
-        mention_user_ids=result.mention_user_ids,
-        reply_targets=reply_targets,
-        mentionable_user_ids=set(mentionable_user_ids),
-    )
+    outgoing_message = Message(result.message)
+    if result.reply_to_event_id is not None:
+        outgoing_message.insert(0, MessageSegment.reply(int(reply_targets[result.reply_to_event_id])))
     send_result = await bot.call_api(
         "send_group_msg",
         group_id=int(trigger_event.group_id),
@@ -455,9 +451,13 @@ async def _run_reply(
             group_id=trigger_event.group_id,
             role="assistant",
             source="llm",
-            content=result.content,
+            content=render_message_content(result.message),
             sent_at=datetime.now().astimezone(),
-            mentioned_user_ids=list(result.mention_user_ids),
+            mentioned_user_ids=[
+                str(segment.data["qq"])
+                for segment in result.message
+                if segment.type == "at" and segment.data.get("qq")
+            ],
             reply_to_message_id=(
                 reply_targets.get(result.reply_to_event_id)
                 if result.reply_to_event_id
@@ -480,30 +480,6 @@ def _reply_targets(state: ConversationState) -> Dict[str, str]:
             continue
         targets[event.event_id] = normalized_message_id
     return targets
-
-
-def _build_outgoing_message(
-    content: str,
-    reply_to_event_id: Optional[str],
-    mention_user_ids: Tuple[str, ...],
-    reply_targets: Dict[str, str],
-    mentionable_user_ids: set[str],
-) -> Any:
-    if reply_to_event_id is None and not mention_user_ids:
-        return content
-    segments: List[MessageSegment] = []
-    if reply_to_event_id is not None:
-        reply_message_id = reply_targets.get(reply_to_event_id)
-        if reply_message_id is None:
-            raise RuntimeError("引用目标不属于当前可回复事件")
-        segments.append(MessageSegment.reply(int(reply_message_id)))
-    for user_id in mention_user_ids:
-        if user_id not in mentionable_user_ids:
-            raise RuntimeError("@目标不是当前群成员")
-        segments.append(MessageSegment.at(user_id))
-        segments.append(MessageSegment.text(" "))
-    segments.append(MessageSegment.text(content))
-    return Message(segments)
 
 
 def _has_llm_reply_after_trigger(

@@ -370,16 +370,25 @@ class LLMProvider:
             content = "" if retry_scheduled else UPSTREAM_BLOCKED_NOTICE
         else:
             try:
-                if common_metadata["api"] == "responses" and finish_reason not in {
+                if (common_metadata["api"] == "responses" or tool_calls) and finish_reason not in {
                     "stop", "tool_calls"
                 }:
                     raise ProviderResponseError(
                         f"模型响应未正常结束: finish_reason={finish_reason}"
                     )
-                content, embedded_reasoning_removed = normalize_outbound_content(
-                    raw_content
-                )
-                if request_type.endswith("_chat_agent") and not tool_calls:
+                if request_type == "direct_chat_agent" and not tool_calls:
+                    if finish_reason != "stop":
+                        raise ProviderResponseError(
+                            f"模型响应未正常结束: finish_reason={finish_reason}"
+                        )
+                    content = raw_content
+                elif request_type.endswith("_chat_agent") and tool_calls:
+                    content = ""
+                else:
+                    content, embedded_reasoning_removed = normalize_outbound_content(
+                        raw_content
+                    )
+                if request_type == "passive_chat_agent" and not tool_calls:
                     validate_chat_outbound_content(content, finish_reason)
             except ProviderResponseError as error:
                 content = ""
