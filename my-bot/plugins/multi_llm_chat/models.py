@@ -204,17 +204,17 @@ class AssistantTurn(StrictModel):
     def as_message(self) -> Dict[str, Any]:
         message: Dict[str, Any] = {
             "role": "assistant",
-            "content": self.content or None,
+            "content": None if self.tool_calls and not self.content else self.content,
         }
+        if self.response_output:
+            # Keep the complete Responses output, including reasoning and built-in
+            # tool items, for the next request in this agent run.
+            message["_responses_output"] = self.response_output
+        if self.encrypted_content:
+            message["encrypted_content"] = self.encrypted_content
+        elif self.reasoning_content:
+            message["reasoning_content"] = self.reasoning_content
         if self.tool_calls:
-            if self.response_output:
-                # Keep the complete Responses output, including reasoning and built-in
-                # tool items, for the next request in this agent run.
-                message["_responses_output"] = self.response_output
-            if self.encrypted_content:
-                message["encrypted_content"] = self.encrypted_content
-            elif self.reasoning_content:
-                message["reasoning_content"] = self.reasoning_content
             message["tool_calls"] = [
                 {
                     "id": call.id,

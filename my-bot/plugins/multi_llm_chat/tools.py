@@ -20,6 +20,7 @@ from typing import (
 )
 from urllib.parse import urlsplit
 
+from nonebot.adapters.onebot.v11 import Message, MessageSegment
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator
 
 from llm_usage import UsageStore
@@ -29,7 +30,14 @@ from .conversation import ConversationStore
 from .identity import GroupRosterService
 from .media import ImageDownloadError, ImageStore
 from .memory import GroupMemoryStore, normalize_memory_text
-from .provider import LLMProvider, ProviderResponseError
+from .prompts import DIRECT_MISSING_REPLY_PROMPT
+from .provider import (
+    CHAT_REPLY_MAX_CHARS,
+    UPSTREAM_BLOCKED_NOTICE,
+    LLMProvider,
+    ProviderResponseError,
+    normalize_outbound_content,
+)
 
 
 class ToolArguments(BaseModel):
@@ -64,6 +72,10 @@ SkipReplyReason = Literal[
     "insufficient_context",
     "bot_spoke_recently",
 ]
+
+
+class AddTextArguments(ToolArguments):
+    text: str = Field(min_length=1, max_length=CHAT_REPLY_MAX_CHARS, description="追加到当前位置的群聊正文，保留空格与换行。")
 
 
 class FinishWithoutReplyArguments(ToolArguments):
@@ -116,6 +128,8 @@ class ReadUrlsArguments(ToolArguments):
         return normalized
 
 
+ADD_TEXT_TOOL_NAME = "add_text"
+SEND_REPLY_TOOL_NAME = "send_reply"
 FINISH_WITHOUT_REPLY_TOOL_NAME = "finish_without_reply"
 REPLY_TO_EVENT_TOOL_NAME = "reply_to_event"
 MENTION_MEMBERS_TOOL_NAME = "mention_members"
@@ -278,17 +292,25 @@ def _make_json_schema_strict(value: Any) -> None:
 @dataclass(frozen=True)
 class AgentRunResult:
     action: Literal["reply", "skip"]
-    content: str
+    message: Message
     tool_steps: int
     skip_reason: str = ""
     reply_to_event_id: Optional[str] = None
-    mention_user_ids: Tuple[str, ...] = ()
 
 
 @dataclass
 class ReplyDraft:
+    message: Message = field(default_factory=Message)
     reply_to_event_id: Optional[str] = None
-    mention_user_ids: List[str] = field(default_factory=list)
+
+    def build_message(self) -> Message:
+        message = Message()
+        for segment in self.message:
+            if segment.type == "text":
+                message.extend(Message(segment.data["text"]))
+            else:
+                message.append(segment)
+        return message
 
 
 class AgentRunner:
@@ -334,7 +356,7 @@ class AgentRunner:
         mentionable_users = set(mentionable_user_ids)
         readable_images = set(readable_image_refs)
         draft = ReplyDraft()
-        tools = self._registry.schemas()
+        tools = [*self._registry.schemas(), add_text_schema(), send_reply_schema()]
         if replyable_events:
             tools.append(reply_to_event_schema())
         if mentionable_users:
@@ -343,35 +365,27 @@ class AgentRunner:
             tools.append(read_group_image_schema())
         if allow_finish_without_reply:
             tools.append(finish_without_reply_schema())
+        asked_about_missing_reply = False
         try:
-            for step in range(self._max_steps + 1):
+            for step in range(self._max_steps + 2):
                 turn = await self._provider.complete(
-                    messages=conversation,
+                    messages=list(conversation),
                     request_type=f"{turn_mode}_chat_agent",
                     turn_id=turn_id,
                     step=step,
                     tools=tools,
-                    tool_choice="auto",
+                    tool_choice="required",
                     allow_builtin_tools=True,
                 )
-                if not turn.tool_calls:
-                    if not turn.content:
-                        raise RuntimeError("大模型没有产生回复或沉默动作")
-                    return AgentRunResult(
-                        action="reply",
-                        content=turn.content,
-                        tool_steps=step,
-                        reply_to_event_id=draft.reply_to_event_id,
-                        mention_user_ids=tuple(draft.mention_user_ids),
-                    )
+                conversation.append(turn.as_message())
+                if not turn.tool_calls and turn.content == UPSTREAM_BLOCKED_NOTICE:
+                    raise ProviderResponseError(UPSTREAM_BLOCKED_NOTICE)
                 skip_calls = [
                     call
                     for call in turn.tool_calls
                     if call.function.name == FINISH_WITHOUT_REPLY_TOOL_NAME
                 ]
-                if skip_calls:
-                    if not allow_finish_without_reply:
-                        raise RuntimeError("当前轮次不允许无回复终止")
+                if skip_calls and allow_finish_without_reply:
                     if len(turn.tool_calls) != 1 or turn.content:
                         raise RuntimeError("沉默动作不能与正文或其他工具同时使用")
                     arguments = FinishWithoutReplyArguments.model_validate_json(
@@ -379,17 +393,45 @@ class AgentRunner:
                     )
                     return AgentRunResult(
                         action="skip",
-                        content="",
+                        message=Message(),
                         tool_steps=step,
                         skip_reason=arguments.reason,
                     )
-                if step >= self._max_steps:
-                    raise RuntimeError("大模型工具调用超过最大轮次")
-                conversation.append(turn.as_message())
+                names = [call.function.name for call in turn.tool_calls]
+                if SEND_REPLY_TOOL_NAME in names[:-1]:
+                    raise RuntimeError("send_reply 必须是本轮最后一个工具调用")
+                at_limit = step >= self._max_steps + int(asked_about_missing_reply)
+                composing_tools = {
+                    ADD_TEXT_TOOL_NAME, MENTION_MEMBERS_TOOL_NAME,
+                    REPLY_TO_EVENT_TOOL_NAME, SEND_REPLY_TOOL_NAME,
+                }
                 image_messages: List[Dict[str, Any]] = []
+                batch_failed = False
                 for tool_call in turn.tool_calls:
                     image_message: Optional[Dict[str, Any]] = None
-                    if tool_call.function.name == REPLY_TO_EVENT_TOOL_NAME:
+                    if tool_call.function.name == FINISH_WITHOUT_REPLY_TOOL_NAME:
+                        result = _json_result(False, error="当前轮次不允许无回复终止")
+                    elif at_limit and tool_call.function.name not in composing_tools:
+                        result = _json_result(False, error="已达到工具轮次上限，请完成回复")
+                    elif tool_call.function.name == SEND_REPLY_TOOL_NAME:
+                        EmptyArguments.model_validate_json(tool_call.function.arguments)
+                        if batch_failed:
+                            result = _json_result(False, error="本批工具调用失败，请先检查草稿再提交")
+                        elif not (
+                            draft.message.extract_plain_text().strip()
+                            or any(segment.type == "at" for segment in draft.message)
+                        ):
+                            result = _json_result(False, error="回复草稿为空")
+                        else:
+                            return AgentRunResult(
+                                action="reply",
+                                message=draft.build_message(),
+                                tool_steps=step,
+                                reply_to_event_id=draft.reply_to_event_id,
+                            )
+                    elif tool_call.function.name == ADD_TEXT_TOOL_NAME:
+                        result = apply_text(draft, tool_call.function.arguments)
+                    elif tool_call.function.name == REPLY_TO_EVENT_TOOL_NAME:
                         result = apply_reply_to_event(
                             draft,
                             tool_call.function.arguments,
@@ -413,6 +455,7 @@ class AgentRunner:
                             tool_call.function.arguments,
                             context,
                         )
+                    batch_failed |= not json.loads(result)["success"]
                     conversation.append(
                         {
                             "role": "tool",
@@ -426,6 +469,18 @@ class AgentRunner:
                     ):
                         image_messages.append(image_message)
                 conversation.extend(image_messages)
+                if not turn.tool_calls or skip_calls or at_limit:
+                    if turn_mode == "direct" and not asked_about_missing_reply:
+                        conversation.append({
+                            "role": "system", "content": DIRECT_MISSING_REPLY_PROMPT,
+                        })
+                        asked_about_missing_reply = True
+                        continue
+                    if skip_calls:
+                        raise RuntimeError("当前轮次不允许无回复终止")
+                    if not turn.tool_calls:
+                        raise RuntimeError("模型未调用群聊回复工具")
+                    break
             raise RuntimeError("大模型工具调用没有产生最终回复")
         finally:
             await asyncio.to_thread(self._cli_runner.remove_workspace, workspace)
@@ -503,6 +558,19 @@ def apply_reply_to_event(
     return _json_result(True, data={"reply_to_event_id": arguments.event_id})
 
 
+def apply_text(draft: ReplyDraft, raw_arguments: str) -> str:
+    try:
+        text = AddTextArguments.model_validate_json(raw_arguments).text
+        combined = draft.message.extract_plain_text() + text
+        _, removed_reasoning = normalize_outbound_content(combined)
+        if removed_reasoning or len(combined) > CHAT_REPLY_MAX_CHARS:
+            raise ValueError("回复含思考标签或超过 4000 字")
+    except (ValueError, ProviderResponseError) as error:
+        return _json_result(False, error=str(error))
+    draft.message.append(MessageSegment.text(text))
+    return _json_result(True)
+
+
 def apply_mentions(
     draft: ReplyDraft,
     raw_arguments: str,
@@ -512,7 +580,7 @@ def apply_mentions(
         arguments = MentionMembersArguments.model_validate_json(raw_arguments)
     except ValidationError as error:
         return _json_result(False, error=f"工具参数校验失败: {error}")
-    requested_user_ids = list(dict.fromkeys(arguments.user_ids))
+    requested_user_ids = arguments.user_ids
     invalid_user_ids = [
         user_id for user_id in requested_user_ids if user_id not in mentionable_user_ids
     ]
@@ -522,9 +590,32 @@ def apply_mentions(
             error="@目标不是当前群成员: " + ",".join(invalid_user_ids),
         )
     for user_id in requested_user_ids:
-        if user_id not in draft.mention_user_ids:
-            draft.mention_user_ids.append(user_id)
-    return _json_result(True, data={"mention_user_ids": draft.mention_user_ids})
+        draft.message.append(MessageSegment.at(user_id))
+    return _json_result(True, data={"mention_user_ids": requested_user_ids})
+
+
+def add_text_schema() -> dict[str, Any]:
+    return {
+        "type": "function",
+        "function": {
+            "name": ADD_TEXT_TOOL_NAME,
+            "description": "在草稿末尾添加正文。可与 mention_members 交替调用，按调用顺序拼接。",
+            "parameters": strict_model_json_schema(AddTextArguments),
+            "strict": True,
+        },
+    }
+
+
+def send_reply_schema() -> dict[str, Any]:
+    return {
+        "type": "function",
+        "function": {
+            "name": SEND_REPLY_TOOL_NAME,
+            "description": "在所有消息段添加完成后最后调用一次，提交整条群消息并结束本轮。",
+            "parameters": strict_model_json_schema(EmptyArguments),
+            "strict": True,
+        },
+    }
 
 
 def reply_to_event_schema() -> Dict[str, Any]:
@@ -534,7 +625,7 @@ def reply_to_event_schema() -> Dict[str, Any]:
             "name": REPLY_TO_EVENT_TOOL_NAME,
             "description": (
                 "设置最终群聊消息要引用的近期事件。参数使用运行时上下文中的 event_id；"
-                "再次调用会覆盖之前的引用目标。此工具不会发送消息，调用后继续输出正文。"
+                "再次调用会覆盖之前的引用目标。此工具不会发送消息，草稿完成后调用 send_reply。"
             ),
             "parameters": strict_model_json_schema(ReplyToEventArguments),
             "strict": True,
@@ -548,8 +639,8 @@ def mention_members_schema() -> Dict[str, Any]:
         "function": {
             "name": MENTION_MEMBERS_TOOL_NAME,
             "description": (
-                "把当前群成员加入最终消息的@目标，可一次指定多人并可多次调用。"
-                "参数只使用已经确认的user_id。此工具不会发送消息，调用后继续输出正文。"
+                "在草稿末尾按顺序追加原生 @ 消息段，可一次指定多人并可多次调用。"
+                "参数只使用已经确认的user_id。此工具不会发送消息，草稿完成后调用 send_reply。"
             ),
             "parameters": strict_model_json_schema(MentionMembersArguments),
             "strict": True,

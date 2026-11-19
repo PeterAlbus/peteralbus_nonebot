@@ -501,7 +501,7 @@ async def test_provider_only_translates_exact_upstream_block_content(tmp_path):
         step=0,
     )
 
-    assert turn.content == UPSTREAM_BLOCKED_CONTENT
+    assert turn.content == content
     assert client.chat.completions.with_raw_response.call_count == 1
 
 
@@ -550,18 +550,18 @@ async def test_provider_accepts_chat_reply_at_character_limit(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_provider_rejects_chat_reply_above_character_limit(tmp_path):
+async def test_direct_turn_preserves_unsubmitted_text_for_followup(tmp_path):
     provider = provider_for_completion(tmp_path)
-    content = "字" * (CHAT_REPLY_MAX_CHARS + 1)
+    content = "<think>" + "字" * CHAT_REPLY_MAX_CHARS
     provider._client_for = lambda provider_config: fake_client(FakeRawResponse(content))
 
-    with pytest.raises(ProviderResponseError, match="超过 4000 字符上限"):
-        await provider.complete(
-            messages=[{"role": "user", "content": "测试"}],
-            request_type="direct_chat_agent",
-            turn_id="turn-too-long",
-            step=0,
-        )
+    turn = await provider.complete(
+        messages=[{"role": "user", "content": "测试"}],
+        request_type="direct_chat_agent",
+        turn_id="turn-followup",
+        step=0,
+    )
+    assert turn.content == content
 
 
 @pytest.mark.asyncio
