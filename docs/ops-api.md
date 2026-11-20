@@ -62,6 +62,8 @@ NapCat 重启会先查找命令行中明确带有 `-q <OPS_NAPCAT_ACCOUNT>` 的 
 
 请求参数为 `group_id`（字符串，必填）、`send`（布尔值，默认 `false`）、`force`（布尔值，默认 `false`）。目标群必须已经在日报配置中启用。默认生成预览；预览会请求天气、新闻源和模型，产生正常的推理用量，但不会发送群消息或写入发送回执。
 
+来源选择使用该群日报配置中的 `source_ids` 与 `disabled_source_ids`，与定时任务一致。接口不接受临时来源覆盖；修改群配置后重启 NoneBot 生效，详见[按群配置日报数据源](daily-digest.md)。
+
 Windows CMD 预览命令（自行替换 Token）：
 
 ```bat

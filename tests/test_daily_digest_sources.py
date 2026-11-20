@@ -11,6 +11,7 @@ from multi_llm_chat.daily_digest import (
     HTML_SOURCES,
     JSON_NEWS_SOURCES,
     DailyDigestConfig,
+    DailyDigestGroup,
     DailyDigestService,
     _deduplicate_items,
     _is_candidate,
@@ -277,7 +278,7 @@ async def test_esports_sources_participate_in_collection_and_fail_independently(
         return json.dumps(data).encode()
 
     monkeypatch.setattr("multi_llm_chat.daily_digest._fetch_bytes", fetch)
-    collection = await service.collect(None, NOW)
+    collection = await service.collect(DailyDigestGroup(group_id="123"), NOW)
     assert len(collection.items) == 1
     assert collection.items[0].source_id == LEAGUE.source_id
     service._logger.warning.assert_called_once()

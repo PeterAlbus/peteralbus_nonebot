@@ -7,7 +7,7 @@ from unittest.mock import AsyncMock, Mock
 import nonebot
 import pytest
 from fastapi import HTTPException
-from multi_llm_chat.daily_digest import DailyDigestConfig
+from multi_llm_chat.daily_digest import DailyDigestConfig, DailyDigestGroup
 
 
 @pytest.fixture
@@ -53,6 +53,25 @@ async def test_preview_has_no_send_or_history_side_effects(dispatch):
     bot.call_api.assert_not_awaited()
     store.append.assert_not_awaited()
     assert not (handler.state_dir / "daily_digest_receipts").exists()
+
+
+@pytest.mark.asyncio
+async def test_manual_preview_and_schedule_use_the_same_group_source_selection(dispatch):
+    handler, service, _, _, _ = dispatch
+    group = DailyDigestGroup(
+        group_id="1103699359",
+        disabled_source_ids=["league_cn", "league_esports_cn", "valorant_esports_cn", "endfield"],
+    )
+    handler.daily_digest_config.groups.append(group)
+    await handler.run_daily_digest(group.group_id)
+    assert service.build_message.await_args.args[0] == group
+    service.build_message.reset_mock()
+
+    await handler.send_daily_digests()
+    selected_groups = [call.args[0] for call in service.build_message.await_args_list]
+    assert [item.group_id for item in selected_groups] == ["123", "1103699359"]
+    assert selected_groups[0].disabled_source_ids == []
+    assert selected_groups[1] == group
 
 
 @pytest.mark.asyncio

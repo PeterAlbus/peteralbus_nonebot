@@ -176,7 +176,9 @@ def register_tools(registry: ToolRegistry) -> None:
 
 ## 每日群聊日报
 
-`multi_llm_chat` 每天按 `Asia/Shanghai` 时区在 10:00 生成一次群聊日报，只发送给 `my-bot/plugins/multi_llm_chat/daily_digest_config.json` 中显式启用的群。当前配置的目标群为 `748245950`。
+`multi_llm_chat` 每天按 `Asia/Shanghai` 时区在 10:00 生成一次群聊日报，只发送给日报配置中显式启用的群。配置由 `LLM_CHAT_DAILY_DIGEST_CONFIG_FILE` 指定，默认是插件目录中的 `daily_digest_config.json`，也可以指向仓库外的实际运行文件。当前示例启用了 `748245950` 和 `1103699359`。
+
+每个群可以通过 `source_ids` 白名单和 `disabled_source_ids` 排除清单，独立选择每一个新闻、赛果、天气或动画来源。省略 `source_ids` 或设为 `null` 时继承全部来源；排除清单优先。未启用的来源在请求前跳过，其条目也不会进入模型候选。群 `1103699359` 仅关闭英雄联盟国服新闻、英雄联盟赛果、无畏契约赛果和终末地，其余来源保留；群 `748245950` 继续使用全部来源。完整来源 ID 和配置示例见[按群配置日报数据源](docs/daily-digest.md)。
 
 日报标题固定为“今日日报”。日报直接读取公开来源自身提供的 JSON API、RSS/Atom 或新闻列表页，包括 Open-Meteo、AniList、各游戏官网、PC Gamer、Gematsu、新华网、中国政府网、上海市政府，以及 OpenAI、Google AI、Google DeepMind、Hugging Face 和 Anthropic。单个来源请求或解析失败不会阻止已经获取的内容进入日报，失败详情只写入应用日志，不出现在群聊正文中。天气请求遇到连接或响应读取失败、超时、HTTP 408/429/5xx 时，等待 1 秒重试一次；最终失败时省略天气段落，其他 HTTP 错误和数据解析错误不重试。
 

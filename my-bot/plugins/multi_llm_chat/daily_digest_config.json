@@ -12,6 +12,19 @@
       "latitude": 31.2304,
       "longitude": 121.4737,
       "enabled": true
+    },
+    {
+      "group_id": "1103699359",
+      "city": "上海",
+      "latitude": 31.2304,
+      "longitude": 121.4737,
+      "enabled": true,
+      "disabled_source_ids": [
+        "league_cn",
+        "league_esports_cn",
+        "valorant_esports_cn",
+        "endfield"
+      ]
     }
   ],
   "limits": {

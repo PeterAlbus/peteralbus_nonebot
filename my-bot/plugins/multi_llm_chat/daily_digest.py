@@ -132,6 +132,23 @@ class DailyDigestGroup(DigestModel):
     latitude: float = Field(default=31.2304, ge=-90, le=90)
     longitude: float = Field(default=121.4737, ge=-180, le=180)
     enabled: bool = True
+    source_ids: list[str] | None = None
+    disabled_source_ids: list[str] = Field(default_factory=list)
+
+    @field_validator("source_ids", "disabled_source_ids")
+    @classmethod
+    def validate_source_ids(cls, value: list[str] | None) -> list[str] | None:
+        if value is None:
+            return None
+        normalized = list(dict.fromkeys(source_id.strip() for source_id in value))
+        unknown = set(normalized) - SOURCE_NAMES.keys()
+        if unknown:
+            raise ValueError(f"未知日报数据源 source_id: {', '.join(sorted(unknown))}")
+        return normalized
+
+    def enabled_source_ids(self) -> set[str]:
+        selected = SOURCE_NAMES.keys() if self.source_ids is None else self.source_ids
+        return set(selected) - set(self.disabled_source_ids)
 
     @field_validator("group_id")
     @classmethod
@@ -166,6 +183,13 @@ class DailyDigestConfig(DigestModel):
     send_time: DailyDigestSendTime = Field(default_factory=DailyDigestSendTime)
     groups: list[DailyDigestGroup] = Field(default_factory=list)
     limits: DailyDigestLimits = Field(default_factory=DailyDigestLimits)
+
+    @model_validator(mode="after")
+    def validate_unique_groups(self) -> DailyDigestConfig:
+        group_ids = [group.group_id for group in self.groups]
+        if len(group_ids) != len(set(group_ids)):
+            raise ValueError("日报 groups 中存在重复 group_id")
+        return self
 
     @field_validator("timezone")
     @classmethod
@@ -425,6 +449,16 @@ HTML_SOURCES: tuple[HtmlSource, ...] = (
 )
 
 
+SOURCE_NAMES: dict[str, str] = {
+    "open_meteo": "Open-Meteo 天气",
+    "anilist_schedule": "AniList 当日动画",
+    **{
+        source.source_id: source.source_name
+        for source in (*FEED_SOURCES, *JSON_NEWS_SOURCES, *ESPORTS_SOURCES, *HTML_SOURCES)
+    },
+}
+
+
 def load_daily_digest_config(path: Path) -> DailyDigestConfig:
     data = json.loads(path.read_text(encoding="utf-8"))
     return DailyDigestConfig.model_validate(data)
@@ -460,6 +494,7 @@ class DailyDigestService:
         now: datetime | None = None,
     ) -> DigestCollection:
         current = _normalize_now(now, self._timezone)
+        enabled_sources = group.enabled_source_ids()
         timeout = aiohttp.ClientTimeout(total=20, connect=8, sock_read=12)
         connector = aiohttp.TCPConnector(limit=8)
         headers = {
@@ -472,39 +507,51 @@ class DailyDigestService:
             connector=connector,
             headers=headers,
         ) as session:
-            weather_task = asyncio.create_task(
-                self._collect_weather_safely(session, group)
+            weather_task = (
+                asyncio.create_task(self._collect_weather_safely(session, group))
+                if "open_meteo" in enabled_sources
+                else None
             )
             source_tasks = [
                 asyncio.create_task(self._collect_feed_safely(session, source))
                 for source in FEED_SOURCES
+                if source.source_id in enabled_sources
             ]
             source_tasks.extend(
                 asyncio.create_task(self._collect_html_safely(session, source))
                 for source in HTML_SOURCES
+                if source.source_id in enabled_sources
             )
             source_tasks.extend(
                 asyncio.create_task(self._collect_json_news_safely(session, source))
                 for source in JSON_NEWS_SOURCES
+                if source.source_id in enabled_sources
             )
             source_tasks.extend(
                 asyncio.create_task(self._collect_esports_safely(session, source))
                 for source in ESPORTS_SOURCES
+                if source.source_id in enabled_sources
             )
-            source_tasks.append(
-                asyncio.create_task(self._collect_anilist_safely(session, current))
-            )
-            weather, results = await asyncio.gather(
-                weather_task,
-                asyncio.gather(*source_tasks),
-            )
+            if "anilist_schedule" in enabled_sources:
+                source_tasks.append(
+                    asyncio.create_task(self._collect_anilist_safely(session, current))
+                )
+            if weather_task is not None:
+                weather, results = await asyncio.gather(
+                    weather_task,
+                    asyncio.gather(*source_tasks),
+                )
+            else:
+                weather = None
+                results = await asyncio.gather(*source_tasks)
 
         window_start = current - timedelta(days=1)
         filtered = [
             item
             for result in results
             for item in result.items
-            if _is_candidate(item, window_start, current)
+            if item.source_id in enabled_sources
+            and _is_candidate(item, window_start, current)
         ]
         items = _deduplicate_items(filtered)
         return DigestCollection(
