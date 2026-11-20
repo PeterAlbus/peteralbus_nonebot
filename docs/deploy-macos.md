@@ -217,7 +217,7 @@ ws://127.0.0.1:2333/onebot/v11/
 
 端口必须与 `.env` 的 `PORT` 一致，访问令牌必须与 `ONEBOT_ACCESS_TOKEN` 一致。保存并启用配置。NoneBot 尚未启动时出现连接重试，启动后应恢复连接。连接协议详见 [NoneBot OneBot 配置文档](https://onebot.adapters.nonebot.dev/docs/guide/setup/)。
 
-老婆图片发送使用本地文件路径，要求路径在 NoneBot 与 NapCat 进程中指向同一个文件。JM 群文件上传通过文件流先将 PDF 传入 NapCat 缓存，不要求 QQ 读取 NoneBot 的 JM 工作目录；可避免 macOS 沙箱拒绝读取该目录的问题。验收时需实测图片发送和 PDF 上传。Mac 上的容器部署不在本文范围内。
+老婆图片由 NoneBot 读取后以 Base64 内容发送；JM 群文件上传通过文件流先将 PDF 传入 NapCat 缓存。这两项功能均不要求 QQ/NapCat 读取 NoneBot 的本地资源或工作目录，可避免 macOS 沙箱拒绝访问这些路径的问题。验收时需实测图片发送和 PDF 上传。Mac 上的容器部署不在本文范围内。
 
 ## 6. 前台启动与功能验收
 
@@ -327,7 +327,7 @@ LaunchAgent 依赖用户登录会话，退出登录后不会继续运行。需�
 | 插件加载失败或出现依赖错误 | 查看完整错误日志；执行 `python -m pip check`，确认安装的是锁定文件对应的 Python 3.12 环境 |
 | NoneBot 正常启动但 NapCat 未连接 | 检查反向 WS 客户端是否启用、路径是否为 `/onebot/v11/`、端口和令牌是否一致 |
 | 普通群聊没有响应 | 检查 `LLM_CHAT_WHITELIST`、模型名称、对应提供商 API Key；被动消息也可能由模型决定不回复 |
-| 老婆图片报目录错误 | 检查 `PETERALBUS_WIFE_RES`、五个指定角色目录及图片文件；NapCat 也需要能够读取图片 |
+| 老婆图片报目录错误 | 检查 `PETERALBUS_WIFE_RES`、五个指定角色目录及图片文件，确保 NoneBot 可读取图片；QQ/NapCat 无需读取该目录 |
 | 吃什么或菜单找不到图片 | 检查 `WHATPIC_RES_PATH` 内的 `eat_pic`、`drink_pic`，并确认用户有读取权限 |
 | JM 下载成功但上传失败 | 检查 NapCat 文件流接口、缓存传输校验、群文件权限、上传超时和配置的大小限制；失败文件位于 JM 任务目录 |
 | 机器人没有原有记忆或历史图片无法读取 | 核对 `LLM_CHAT_STATE_DIR` 是否直接包含四个状态子目录，确认 `media` 一并迁移 |

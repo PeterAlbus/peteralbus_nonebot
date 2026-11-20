@@ -1,4 +1,6 @@
+import asyncio
 import random
+from pathlib import Path
 from typing import Dict, Optional
 
 from nonebot import get_plugin_config, on_command, require
@@ -125,16 +127,21 @@ async def today_wife_handle(event: GroupMessageEvent):
 
     if character_name is None or image_path is None:
         await today_wife.finish("寻找老婆出错了...")
+    try:
+        image_bytes = await asyncio.to_thread(Path(image_path).read_bytes)
+    except OSError:
+        logger.exception("读取老婆图片失败: {}", image_path)
+        return await today_wife.finish("老婆图片读取失败，请联系管理员检查资源。")
     # 发送角色名和图片
     if is_new:
         message = MessageSegment.text(
             f"今日老婆：{character_name}!"
-        ) + MessageSegment.image(image_path)
+        ) + MessageSegment.image(image_bytes)
     else:
         message = MessageSegment.text(
             f"今日老婆：{character_name}。"
-        ) + MessageSegment.image(image_path)
-    # 发送图片路径
+        ) + MessageSegment.image(image_bytes)
+    # 发送图片内容，避免 QQ/NapCat 读取 NoneBot 的本地资源路径。
     await today_wife.finish(message, at_sender=True)
 
 
