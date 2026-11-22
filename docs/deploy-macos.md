@@ -154,6 +154,8 @@ export MEME_HOME="/absolute/path/to/napcat/meme_generator"
 
 JM 的工作目录由 `PETERALBUS_WIFE_JM_WORK_DIR` 指定。每次下载在其中建立独立任务目录，图片和 PDF 均在该任务目录内生成；`config.json` 用于下载参数和目录命名规则。上传成功后任务目录删除，失败任务按 `PETERALBUS_WIFE_JM_FAILED_RETENTION_HOURS` 的配置保留并在后续任务中清理。
 
+JM 在每个下载任务实际开始时重新读取系统代理，代理端口切换或关闭后，后续任务无需重启 NoneBot 即可读取新设置。`config.json` 中显式配置的 `client.postman.meta_data.proxies` 仍优先于系统代理。
+
 PDF 先由 NoneBot 通过现有 OneBot 连接调用 `upload_file_stream`，按 256 KiB 分块传入 NapCat 自身缓存；完成文件大小和 SHA-256 校验后，才将返回的缓存路径交给 `upload_group_file`。NapCat 需要支持文件流接口（v4.8.115+），无需新端口或密钥。`PETERALBUS_WIFE_JM_UPLOAD_TIMEOUT` 包含缓存传输与群文件上传；传输中断会重置本任务流，远端缓存使用独立随机文件名并在配置上传超时加 60 秒后过期，不调用全局临时文件清理接口。
 
 `PETERALBUS_WIFE_JM_ALLOWED_GROUPS` 和 `PETERALBUS_WIFE_JM_ALLOWED_USERS` 默认空列表，分别表示不限制群和用户；配置为非空时，两项限制同时生效。`LLM_CHAT_WHITELIST` 为空则不会处理普通群聊消息。

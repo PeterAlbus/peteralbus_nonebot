@@ -5,7 +5,14 @@ from pathlib import Path
 from typing import Optional, Set, Tuple
 from uuid import uuid4
 
-from jmcomic import Feature, JmOption, create_option_by_file, download_album_async
+from common import ProxyBuilder
+from jmcomic import (
+    Feature,
+    JmModuleConfig,
+    JmOption,
+    create_option_by_file,
+    download_album_async,
+)
 from nonebot import get_plugin_config, on_command
 from nonebot.adapters.onebot.v11 import GROUP, Bot, GroupMessageEvent, Message
 from nonebot.log import logger
@@ -52,6 +59,8 @@ def _prepare_job(jm_code: str) -> Tuple[JmOption, Path, Path]:
     if not option_path.is_file():
         raise FileNotFoundError(f"JM 配置文件不存在: {option_path}")
 
+    # JM 默认在导入时缓存系统代理；每个任务重新读取，再由文件中的显式配置覆盖。
+    JmModuleConfig.DEFAULT_PROXIES = ProxyBuilder.system_proxy()
     option = create_option_by_file(str(option_path))
     work_root.mkdir(parents=True, exist_ok=True)
     job_dir = (work_root / f"jm-{jm_code}-{uuid4().hex}").resolve()
