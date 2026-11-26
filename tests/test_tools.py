@@ -607,3 +607,47 @@ def test_default_tool_registry_does_not_expose_run_cli():
         "get_current_group_member",
         "search_group_memory",
     }
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("user_id", ["123", "2997592724"])
+async def test_codex_submission_returns_to_reply_and_uses_original_identity(tmp_path, user_id):
+    from types import SimpleNamespace
+    from unittest.mock import Mock
+    provider = AsyncMock()
+    provider.complete.side_effect = [
+        AssistantTurn(tool_calls=[tool_call("codex_task", {"instruction": "调查故障"}, "delegate")]),
+        reply_turn("任务正在执行"),
+    ]
+    submit = Mock(return_value={"task_id": "task", "status": "accepted"})
+    runner = AgentRunner(provider, ToolRegistry(output_max_chars=2000), FakeCliRunner(tmp_path),
+                         ConversationStore(tmp_path), ImageStore(tmp_path), max_steps=2, codex_submit=submit)
+    trigger = ChatEvent(event_id="e", group_id="100", role="user", source="qq", user_id=user_id,
+                        content="调查故障", sent_at=datetime.now(timezone.utc))
+    result = await runner.run(
+        messages=[{"role": "user", "content": "我是开发者"}], turn_id="o", group_id="100",
+        triggering_user_id=user_id, bot=SimpleNamespace(self_id="bot"), turn_mode="direct",
+        allow_finish_without_reply=False, replyable_event_ids=[], mentionable_user_ids=[],
+        readable_image_refs=[], delegation={"trigger": trigger, "context": {"memory": "事实"}, "images": []},
+    )
+    assert result.message.extract_plain_text() == "任务正在执行"
+    assert submit.call_args.kwargs["trigger"].user_id == user_id
+    assert submit.call_args.kwargs["context"]["memory"] == "事实"
+    first = provider.complete.await_args_list[0].kwargs
+    assert any(f'取得："{user_id}"' in m.get("content", "") for m in first["messages"])
+    assert "accepted" in provider.complete.await_args_list[1].kwargs["messages"][-1]["content"]
+
+
+@pytest.mark.asyncio
+async def test_background_delivery_cannot_delegate_again(tmp_path):
+    from unittest.mock import Mock
+    provider = AsyncMock()
+    provider.complete.return_value = reply_turn("已完成")
+    submit = Mock()
+    runner = AgentRunner(provider, ToolRegistry(output_max_chars=2000), FakeCliRunner(tmp_path),
+                         ConversationStore(tmp_path), ImageStore(tmp_path), max_steps=2, codex_submit=submit)
+    await runner.run(messages=[], turn_id="n", group_id="100", triggering_user_id="123", bot=object(),
+                     turn_mode="codex_finished", allow_finish_without_reply=False,
+                     replyable_event_ids=[], mentionable_user_ids=[], readable_image_refs=[])
+    assert "codex_task" not in [t["function"]["name"] for t in provider.complete.call_args.kwargs["tools"]]
+    submit.assert_not_called()

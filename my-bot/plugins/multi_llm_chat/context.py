@@ -1,5 +1,5 @@
 import json
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any, Dict, List, Literal, Optional, Sequence, Tuple
 
@@ -20,7 +20,7 @@ from .prompts import (
     PERSONA_SYSTEM_PROMPT,
 )
 
-TurnMode = Literal["direct", "passive"]
+TurnMode = Literal["direct", "passive", "codex_progress", "codex_finished"]
 ImageReference = Tuple[str, int]
 
 
@@ -28,6 +28,8 @@ ImageReference = Tuple[str, int]
 class ContextBuildResult:
     messages: List[Dict[str, Any]]
     readable_image_refs: Tuple[ImageReference, ...]
+    delegation_context: Dict[str, Any] = field(default_factory=dict)
+    delegation_images: Tuple[str, ...] = ()
 
 
 class ContextBuilder:
@@ -203,6 +205,14 @@ class ContextBuilder:
         return ContextBuildResult(
             messages=[*system_messages, *selected_messages],
             readable_image_refs=tuple(readable_image_refs),
+            delegation_context={
+                "runtime": runtime_context,
+                "events": [event.model_dump(mode="json") for event in selected_events],
+            },
+            delegation_images=tuple(dict.fromkeys(
+                str(self._image_store.resource_path(image))
+                for event in selected_events for image in event.images
+            )),
         )
 
     def split_for_compression(
@@ -264,6 +274,19 @@ def _turn_prompt(
     turn_mode: TurnMode,
     allow_finish_without_reply: bool,
 ) -> str:
+    if turn_mode == "codex_progress":
+        return (
+            "本轮由后台 Codex 任务进展触发。结合任务数据、近期群聊与已发进度，"
+            "仅在出现值得用户知道的新进展时简短回复，否则调用 finish_without_reply。"
+            "不得将中间观察当作最终结论，不复述原始日志，不重复已发通知。"
+        )
+    if turn_mode == "codex_finished":
+        return (
+            "本轮由后台 Codex 任务结束触发，必须向原请求者交付结果。"
+            "依据任务状态与证据说明结果、验证和未完成项；失败或中断如实说明。"
+            "不要把执行结束等同于目标实现，不宣称新的工作正在执行。"
+            "使用 add_text、必要的引用或提及，以及 send_reply 提交回复。"
+        )
     if turn_mode == "passive":
         return PASSIVE_TURN_SYSTEM_PROMPT
     if allow_finish_without_reply:

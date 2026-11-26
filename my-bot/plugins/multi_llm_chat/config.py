@@ -1,4 +1,4 @@
-from typing import List, Optional
+from typing import List, Literal, Optional
 
 from pydantic import BaseModel, Field
 
@@ -44,3 +44,13 @@ class Config(BaseModel):
     llm_chat_cli_timeout_seconds: int = 20
     llm_chat_cli_output_max_chars: int = 12000
     llm_chat_cli_workspace_dir: str = "tool_workspaces"
+
+    llm_chat_codex_enabled: bool = False
+    llm_chat_codex_binary: str = "codex"
+    llm_chat_codex_home: str = ""
+    llm_chat_codex_working_dir: str = ""
+    llm_chat_codex_model: str = ""
+    llm_chat_codex_sandbox: Literal["read-only", "workspace-write"] = "workspace-write"
+    llm_chat_codex_network_access: bool = False
+    llm_chat_codex_task_timeout: int = Field(default=1800, ge=30)
+    llm_chat_codex_progress_interval: int = Field(default=60, ge=10)

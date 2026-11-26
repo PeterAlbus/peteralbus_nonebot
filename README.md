@@ -128,6 +128,10 @@ Token 用量持久化在 `LLM_CHAT_STATE_DIR/usage.sqlite3`，从启用时开始
 
 `add_text` 和 `mention_members` 可以交替调用多次，按调用顺序拼成一条消息。例如可以先写开场，再 @ 一位群员，最后追加问题。每段正文按 OneBot CQ 码语法解析，包括 `[CQ:at,qq=all]`。`send_reply` 提交整条草稿，发送层一次发送。引用目标必须是近期上下文中保存了 OneBot `message_id` 的事件；`mention_members` 的目标必须来自当前群成员快照，且不能是机器人自己。`read_group_image` 只接受本轮上下文明确提供的 `event_id` 与 `image_index`，不能读取其他群、已压缩事件或任意文件。
 
+### Codex 后台任务
+
+小P可以自主把复杂任务交给 Codex CLI，提交后继续回复；阶段进展与最终结果触发小P重新生成群聊消息。支持上下文和图片快照、任务持久化，以及小P/Codex两层提示词风险判断。功能默认关闭，安装、登录和环境配置见 [Codex 后台任务文档](docs/codex-tasks.md)。
+
 ### 自定义 Python 工具
 
 将 `LLM_CHAT_CUSTOM_TOOLS_MODULE` 设置为一个可导入的 Python 模块。该模块必须提供同步注册函数：

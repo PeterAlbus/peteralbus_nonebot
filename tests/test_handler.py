@@ -555,3 +555,40 @@ def test_direct_finish_requires_llm_reply_after_trigger() -> None:
         ),
         trigger,
     )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("kind", ["progress", "finished"])
+async def test_codex_notification_uses_xiaop_and_discards_finished_progress(monkeypatch, kind):
+    from unittest.mock import AsyncMock
+    from multi_llm_chat.codex_tasks import CodexTask
+    nonebot.init()
+    handler = importlib.import_module("multi_llm_chat.handler")
+    trigger = ChatEvent(event_id="original", platform_message_id="123", group_id="100", role="user",
+                        source="qq", user_id="200", content="调查", sent_at=datetime.now(timezone.utc))
+    task = CodexTask(task_id="task", origin_turn_id="origin", bot_id="bot", trigger=trigger,
+                     instruction="调查", context={}, status="running" if kind == "progress" else "completed",
+                     result="证据")
+    manager = SimpleNamespace(tasks={"task": task})
+    monkeypatch.setattr(handler, "codex_tasks", manager)
+    monkeypatch.setattr(handler, "config", SimpleNamespace(llm_chat_whitelist=["100"]))
+    monkeypatch.setattr(handler, "_get_connected_bot", lambda _: SimpleNamespace(self_id="bot"))
+    monkeypatch.setattr(handler.conversation_store, "get", AsyncMock(return_value=ConversationState(group_id="100")))
+    monkeypatch.setattr(handler.context_builder, "build", AsyncMock(return_value=ContextBuildResult(messages=[], readable_image_refs=())))
+    monkeypatch.setattr(handler.roster_service, "get_roster", AsyncMock(return_value=SimpleNamespace(members={})))
+    async def run(**kwargs):
+        assert kwargs["turn_mode"] == f"codex_{kind}"
+        assert "delegation" not in kwargs
+        assert "证据" in kwargs["messages"][-1]["content"]
+        if kind == "progress":
+            task.status = "completed"
+        return AgentRunResult(action="reply", message=Message("小P整理后的结果"), tool_steps=0)
+    monkeypatch.setattr(handler.agent_runner, "run", run)
+    send = AsyncMock(return_value="sent")
+    monkeypatch.setattr(handler, "_send_agent_reply", send)
+    await handler._report_codex_task(task.model_copy(deep=True), kind)
+    if kind == "progress":
+        send.assert_not_called()
+    else:
+        assert send.await_args.kwargs["completed_task_id"] == "task"
+        assert send.await_args.args[2].message.extract_plain_text() == "小P整理后的结果"

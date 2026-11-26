@@ -160,6 +160,10 @@ class ImageStore:
                     pass
         return deleted
 
+    def resource_path(self, image: ImageResource) -> Path:
+        """Resolve a stored image for copying into a delegated task's lifetime."""
+        return self._resolve_media_key(image.media_key)
+
     def _data_url(self, image: ImageResource) -> str:
         path = self._resolve_media_key(image.media_key)
         data = path.read_bytes()

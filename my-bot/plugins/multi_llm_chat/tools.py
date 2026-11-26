@@ -25,8 +25,10 @@ from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_valida
 
 from llm_usage import UsageStore
 
+from .codex_policy import operation_review
 from .cli_runner import DockerCliRunner
 from .conversation import ConversationStore
+from .context import TurnMode
 from .identity import GroupRosterService
 from .media import ImageDownloadError, ImageStore
 from .memory import GroupMemoryStore, normalize_memory_text
@@ -313,6 +315,10 @@ class ReplyDraft:
         return message
 
 
+class CodexTaskArguments(ToolArguments):
+    instruction: str = Field(min_length=1, max_length=12000)
+
+
 class AgentRunner:
     def __init__(
         self,
@@ -322,6 +328,7 @@ class AgentRunner:
         conversation_store: ConversationStore,
         image_store: ImageStore,
         max_steps: int,
+        codex_submit: Optional[Callable[..., Dict[str, str]]] = None,
     ) -> None:
         self._provider = provider
         self._registry = registry
@@ -329,6 +336,7 @@ class AgentRunner:
         self._conversation_store = conversation_store
         self._image_store = image_store
         self._max_steps = max(1, max_steps)
+        self._codex_submit = codex_submit
 
     async def run(
         self,
@@ -337,11 +345,12 @@ class AgentRunner:
         group_id: str,
         triggering_user_id: str,
         bot: Any,
-        turn_mode: Literal["direct", "passive"],
+        turn_mode: TurnMode,
         allow_finish_without_reply: bool,
         replyable_event_ids: Sequence[str],
         mentionable_user_ids: Sequence[str],
         readable_image_refs: Sequence[Tuple[str, int]],
+        delegation: Optional[Dict[str, Any]] = None,
     ) -> AgentRunResult:
         workspace = self._cli_runner.create_workspace(turn_id)
         context = ToolContext(
@@ -352,6 +361,8 @@ class AgentRunner:
             workspace=workspace,
         )
         conversation = list(messages)
+        if self._codex_submit is not None:
+            conversation.append({"role": "system", "content": operation_review(triggering_user_id or "未知")})
         replyable_events = set(replyable_event_ids)
         mentionable_users = set(mentionable_user_ids)
         readable_images = set(readable_image_refs)
@@ -365,6 +376,18 @@ class AgentRunner:
             tools.append(read_group_image_schema())
         if allow_finish_without_reply:
             tools.append(finish_without_reply_schema())
+        if self._codex_submit is not None and delegation is not None and turn_mode in {"direct", "passive"}:
+            tools.append({"type": "function", "function": {
+                "name": "codex_task",
+                "description": (
+                    "将需要多步调查、代码或文件操作的复杂任务交给后台 Codex。"
+                    "当前群聊背景会自动附带；instruction 写明目标、约束与交付要求。"
+                    "只提交任务，立即返回受理状态，不等待结果。每轮最多创建一个任务。"
+                    "成功后继续使用 add_text/send_reply 正常回复，可说明已受理；"
+                    "进度和完成结果稍后由小P主动通知。不得声称任务已完成。"
+                ),
+                "parameters": strict_model_json_schema(CodexTaskArguments), "strict": True,
+            }})
         asked_about_missing_reply = False
         try:
             for step in range(self._max_steps + 2):
@@ -429,6 +452,22 @@ class AgentRunner:
                                 tool_steps=step,
                                 reply_to_event_id=draft.reply_to_event_id,
                             )
+                    elif tool_call.function.name == "codex_task" and self._codex_submit is not None and delegation is not None and turn_mode in {"direct", "passive"}:
+                        try:
+                            arguments = CodexTaskArguments.model_validate_json(tool_call.function.arguments)
+                            snapshot = copy.deepcopy(delegation["context"])
+                            snapshot["tool_results"] = [
+                                {"tool_call_id": item.get("tool_call_id"), "content": item.get("content")}
+                                for item in conversation[len(messages):] if item.get("role") == "tool"
+                            ]
+                            submitted = self._codex_submit(
+                                origin_turn_id=turn_id, bot_id=str(bot.self_id),
+                                trigger=delegation["trigger"], instruction=arguments.instruction,
+                                context=snapshot, image_paths=delegation["images"],
+                            )
+                            result = _json_result(True, data=submitted)
+                        except Exception as error:
+                            result = _json_result(False, error=f"Codex 任务未受理: {type(error).__name__}: {error}")
                     elif tool_call.function.name == ADD_TEXT_TOOL_NAME:
                         result = apply_text(draft, tool_call.function.arguments)
                     elif tool_call.function.name == REPLY_TO_EVENT_TOOL_NAME:
@@ -470,7 +509,7 @@ class AgentRunner:
                         image_messages.append(image_message)
                 conversation.extend(image_messages)
                 if not turn.tool_calls or skip_calls or at_limit:
-                    if turn_mode == "direct" and not asked_about_missing_reply:
+                    if turn_mode in {"direct", "codex_finished"} and not asked_about_missing_reply:
                         conversation.append({
                             "role": "system", "content": DIRECT_MISSING_REPLY_PROMPT,
                         })
